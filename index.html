@@ -114,6 +114,11 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
         <input type="checkbox" id="toggleBuildings" checked/>
         <label for="toggleBuildings" style="margin:0">建物を表示 (OSM)</label>
       </div>
+      <div style="margin-top:10px">
+        <label>垂直誇張 <span style="color:#81d4fa;font-size:0.75rem">（平地は2〜3倍推奨）</span></label>
+        <input type="range" id="vertExag" min="1" max="5" step="0.5" value="2"/>
+        <div id="exagLabel" style="font-size:0.82rem;color:#81d4fa;text-align:right;margin-top:2px">2.0x</div>
+      </div>
     </div>
 
     <div id="progressWrap">
