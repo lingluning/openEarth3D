@@ -10,6 +10,93 @@ async function fetchElev(lat, lon) {
   } catch { return 0; }
 }
 
+// Fractional tile position (not floored)
+function deg2tileFrac(lat, lon, z) {
+  const n = Math.pow(2, z);
+  const lr = lat * Math.PI / 180;
+  return {
+    x: (lon + 180) / 360 * n,
+    y: (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n
+  };
+}
+
+// Decode a GSI DEM PNG tile → Float32Array(256*256) of elevations in metres
+async function fetchDemTile(z, tx, ty) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 256;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const px = ctx.getImageData(0, 0, 256, 256).data;
+      const arr = new Float32Array(256 * 256);
+      for (let i = 0; i < 256 * 256; i++) {
+        const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+        const v = r * 65536 + g * 256 + b;
+        // 8388608 (0x800000) = no-data sentinel
+        arr[i] = v === 8388608 ? 0 : v < 8388608 ? v * 0.01 : (v - 16777216) * 0.01;
+      }
+      resolve(arr);
+    };
+    img.onerror = () => resolve(null);
+    // dem5a_png: ~5m DEM, zoom 9-15 (Japan only)
+    img.src = `https://cyberjapandata.gsi.go.jp/xyz/dem5a_png/${z}/${tx}/${ty}.png`;
+  });
+}
+
+// Bilinear sample from a decoded tile array
+function sampleTile(arr, fx, fy) {
+  if (!arr) return 0;
+  const x0 = Math.max(0, Math.min(255, Math.floor(fx)));
+  const y0 = Math.max(0, Math.min(255, Math.floor(fy)));
+  const x1 = Math.min(255, x0 + 1);
+  const y1 = Math.min(255, y0 + 1);
+  const tx = fx - x0, ty = fy - y0;
+  return (arr[y0 * 256 + x0] * (1 - tx) + arr[y0 * 256 + x1] * tx) * (1 - ty)
+       + (arr[y1 * 256 + x0] * (1 - tx) + arr[y1 * 256 + x1] * tx) * ty;
+}
+
+// High-resolution terrain from GSI DEM PNG tiles (~10m at z=14, Japan coverage)
+// Returns null if outside Japan (all tiles 404)
+async function fetchElevGridHiRes(bb, meshN, onProgress) {
+  const z = 14;
+  const nwF = deg2tileFrac(bb.n, bb.w, z);
+  const seF = deg2tileFrac(bb.s, bb.e, z);
+  const txMin = Math.floor(nwF.x), txMax = Math.floor(seF.x);
+  const tyMin = Math.floor(nwF.y), tyMax = Math.floor(seF.y);
+
+  const total = (txMax - txMin + 1) * (tyMax - tyMin + 1);
+  const tileMap = {};
+  let done = 0;
+
+  for (let ty = tyMin; ty <= tyMax; ty++) {
+    for (let tx = txMin; tx <= txMax; tx++) {
+      tileMap[`${tx}_${ty}`] = await fetchDemTile(z, tx, ty);
+      onProgress && onProgress(++done / total * 0.85);
+    }
+  }
+
+  if (!Object.values(tileMap).some(Boolean)) return null; // outside Japan
+
+  const grid = [];
+  for (let r = 0; r < meshN; r++) {
+    const lat = bb.n - r * (bb.n - bb.s) / (meshN - 1);
+    const row = [];
+    for (let c = 0; c < meshN; c++) {
+      const lon = bb.w + c * (bb.e - bb.w) / (meshN - 1);
+      const frac = deg2tileFrac(lat, lon, z);
+      const tx = Math.floor(frac.x), ty = Math.floor(frac.y);
+      row.push(sampleTile(tileMap[`${tx}_${ty}`], (frac.x - tx) * 256, (frac.y - ty) * 256));
+    }
+    grid.push(row);
+    onProgress && onProgress(0.85 + r / meshN * 0.15);
+  }
+  return grid;
+}
+
+// Fallback: individual-point API (works globally, slower, lower resolution)
 async function fetchElevGrid(bb, n, onProgress) {
   const lats = Array.from({ length: n }, (_, i) => bb.n - i * (bb.n - bb.s) / (n - 1));
   const lons = Array.from({ length: n }, (_, i) => bb.w + i * (bb.e - bb.w) / (n - 1));
