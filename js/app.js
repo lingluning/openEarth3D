@@ -1,6 +1,7 @@
 'use strict';
 
-const GRID_N = 32;
+// 128×128 mesh using DEM PNG tiles → ~10m resolution, comparable to Google Earth
+const GRID_N   = 128;
 const PHOTO_ZOOM = 17;
 
 let leafletMap, leafletMarker;
@@ -10,20 +11,13 @@ function initMap() {
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '© OpenStreetMap contributors'
   }).addTo(leafletMap);
-
-  leafletMap.on('click', e => {
-    setCenter(e.latlng.lat, e.latlng.lng);
-  });
+  leafletMap.on('click', e => setCenter(e.latlng.lat, e.latlng.lng));
 }
 
 function setCenter(lat, lon) {
-  const kmVal = parseFloat(document.getElementById('rangeKm').value) || 1.0;
-  bboxFromCenter(lat, lon, kmVal); // validate
-
   if (leafletMarker) leafletMap.removeLayer(leafletMarker);
   leafletMarker = L.marker([lat, lon]).addTo(leafletMap);
   leafletMap.setView([lat, lon], 15);
-
   document.getElementById('latInput').value = lat.toFixed(6);
   document.getElementById('lonInput').value = lon.toFixed(6);
 }
@@ -33,8 +27,8 @@ function setProgress(pct, label) {
   document.getElementById('progressLabel').textContent = label;
 }
 
-function showProgress(visible) {
-  document.getElementById('progressWrap').style.display = visible ? 'flex' : 'none';
+function showProgress(v) {
+  document.getElementById('progressWrap').style.display = v ? 'flex' : 'none';
 }
 
 async function run() {
@@ -48,14 +42,21 @@ async function run() {
 
   document.getElementById('runBtn').disabled = true;
   showProgress(true);
-  setProgress(0, '地形データ取得中…');
 
   const bb = bboxFromCenter(lat, lon, km);
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
 
+  // ── Step 1: terrain elevation ──────────────────────────────────────────
+  setProgress(0, '地形データ取得中（高精度DEM）…');
   let elevGrid;
   try {
-    elevGrid = await fetchElevGrid(bb, GRID_N, p => setProgress(p * 0.4, '地形データ取得中…'));
+    // Try high-res DEM PNG tiles first (Japan only)
+    elevGrid = await fetchElevGridHiRes(bb, GRID_N, p => setProgress(p * 0.4, '地形データ取得中（高精度DEM）…'));
+    if (!elevGrid) {
+      // Outside Japan: fallback to individual API with reduced grid
+      setProgress(0, '地形データ取得中（グローバル）…');
+      elevGrid = await fetchElevGrid(bb, 48, p => setProgress(p * 0.4, '地形データ取得中（グローバル）…'));
+    }
   } catch (e) {
     alert('地形データ取得失敗: ' + e.message);
     document.getElementById('runBtn').disabled = false;
@@ -63,6 +64,9 @@ async function run() {
     return;
   }
 
+  const meshN = elevGrid.length; // may differ from GRID_N if fallback was used
+
+  // ── Step 2: aerial photo ───────────────────────────────────────────────
   setProgress(0.4, '航空写真取得中…');
   let photoUrl;
   try {
@@ -74,43 +78,43 @@ async function run() {
     return;
   }
 
+  // ── Step 3: build 3D scene ─────────────────────────────────────────────
   setProgress(0.7, '3Dシーン構築中…');
   clearSceneObjects();
+  scene.add(buildTerrain(elevGrid, meshN, xSize, zSize, photoUrl, vertExag));
+  placeCameraOverTerrain(elevGrid, meshN, xSize, zSize, vertExag);
 
-  const terrainMesh = buildTerrain(elevGrid, GRID_N, xSize, zSize, photoUrl, vertExag);
-  scene.add(terrainMesh);
-  placeCameraOverTerrain(elevGrid, GRID_N, xSize, zSize, vertExag);
-
+  // ── Step 4: buildings ──────────────────────────────────────────────────
   if (showBuildings) {
-    setProgress(0.75, '建物データ取得中…');
+    setProgress(0.75, '建物データ取得中（OSM）…');
     try {
       const elements = await fetchBuildings(bb);
       setProgress(0.88, '建物3D生成中…');
       const parsed = parseBuildings(elements, bb);
-      const group = createBuildingGroup(parsed, bb, elevGrid, GRID_N, vertExag);
-      scene.add(group);
+      scene.add(createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag));
+      setProgress(0.96, `建物 ${parsed.length} 棟を生成`);
     } catch (e) {
       console.warn('建物取得失敗:', e);
     }
   }
 
   setProgress(1.0, '完了');
-  setTimeout(() => showProgress(false), 800);
+  setTimeout(() => showProgress(false), 1000);
   document.getElementById('runBtn').disabled = false;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  const canvas = document.getElementById('glCanvas');
-  initScene(canvas);
+  initScene(document.getElementById('glCanvas'));
   initMap();
 
   document.getElementById('runBtn').addEventListener('click', run);
 
   document.getElementById('locBtn').addEventListener('click', () => {
     if (!navigator.geolocation) { alert('Geolocation not supported'); return; }
-    navigator.geolocation.getCurrentPosition(pos => {
-      setCenter(pos.coords.latitude, pos.coords.longitude);
-    }, () => alert('位置情報の取得に失敗しました'));
+    navigator.geolocation.getCurrentPosition(
+      pos => setCenter(pos.coords.latitude, pos.coords.longitude),
+      () => alert('位置情報の取得に失敗しました')
+    );
   });
 
   document.getElementById('rangeKm').addEventListener('input', function () {
