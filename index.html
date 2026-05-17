@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>openEarth3D — 3D City Viewer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0f0;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+#header{background:#16213e;padding:10px 16px;display:flex;align-items:center;gap:12px;flex-shrink:0;border-bottom:1px solid #0f3460}
+#header h1{font-size:1.1rem;font-weight:700;color:#4fc3f7;white-space:nowrap}
+#header h1 span{color:#81d4fa;font-weight:400;font-size:0.85rem;margin-left:6px}
+
+#main{flex:1;display:flex;overflow:hidden}
+
+#sidebar{width:280px;flex-shrink:0;background:#16213e;padding:14px;overflow-y:auto;display:flex;flex-direction:column;gap:12px;border-right:1px solid #0f3460}
+
+.card{background:#0f3460;border-radius:8px;padding:12px}
+.card h3{font-size:0.78rem;text-transform:uppercase;letter-spacing:.06em;color:#90caf9;margin-bottom:8px}
+
+label{font-size:0.82rem;color:#b0c4de;display:block;margin-bottom:3px}
+input[type=text],input[type=number]{width:100%;background:#1a1a2e;border:1px solid #0f3460;color:#e0e0f0;padding:5px 8px;border-radius:5px;font-size:0.85rem;outline:none}
+input:focus{border-color:#4fc3f7}
+
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+
+input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
+#kmLabel{font-size:0.82rem;color:#81d4fa;text-align:right;margin-top:2px}
+
+.presets{display:flex;flex-wrap:wrap;gap:4px}
+.presets button{background:#1a1a2e;border:1px solid #4fc3f7;color:#4fc3f7;border-radius:4px;padding:3px 7px;font-size:0.75rem;cursor:pointer;transition:background .15s}
+.presets button:hover{background:#4fc3f7;color:#1a1a2e}
+
+.toggle-row{display:flex;align-items:center;gap:8px;font-size:0.83rem;color:#b0c4de}
+.toggle-row input[type=checkbox]{accent-color:#4fc3f7;width:15px;height:15px;cursor:pointer}
+
+#runBtn{width:100%;padding:9px;background:linear-gradient(135deg,#0066cc,#4fc3f7);border:none;color:#fff;font-size:0.95rem;font-weight:700;border-radius:7px;cursor:pointer;transition:opacity .2s}
+#runBtn:hover{opacity:.9}
+#runBtn:disabled{opacity:.5;cursor:not-allowed}
+
+#locBtn{width:100%;padding:6px;background:#0f3460;border:1px solid #4fc3f7;color:#4fc3f7;border-radius:6px;font-size:0.8rem;cursor:pointer}
+#locBtn:hover{background:#4fc3f7;color:#1a1a2e}
+
+#minimap{height:160px;border-radius:6px;overflow:hidden}
+
+#progressWrap{display:none;flex-direction:column;gap:4px;margin-top:4px}
+#progressTrack{background:#1a1a2e;border-radius:4px;height:8px;overflow:hidden}
+#progressBar{height:100%;background:linear-gradient(90deg,#4fc3f7,#81d4fa);width:0%;transition:width .3s;border-radius:4px}
+#progressLabel{font-size:0.75rem;color:#90caf9;text-align:center}
+
+#viewport{flex:1;position:relative;overflow:hidden}
+#glCanvas{display:block;width:100%;height:100%}
+
+.hint{position:absolute;bottom:10px;right:12px;font-size:0.72rem;color:rgba(255,255,255,.4);pointer-events:none;text-align:right;line-height:1.6}
+
+.legend{display:flex;flex-direction:column;gap:4px}
+.legend-item{display:flex;align-items:center;gap:6px;font-size:0.76rem;color:#b0c4de}
+.legend-dot{width:12px;height:12px;border-radius:2px;flex-shrink:0}
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>openEarth3D <span>— 3D City Viewer</span></h1>
+</div>
+
+<div id="main">
+  <div id="sidebar">
+
+    <div class="card">
+      <h3>場所を選択</h3>
+      <div class="row2">
+        <div>
+          <label>緯度</label>
+          <input type="text" id="latInput" value="35.681200" placeholder="35.681200"/>
+        </div>
+        <div>
+          <label>経度</label>
+          <input type="text" id="lonInput" value="139.767100" placeholder="139.767100"/>
+        </div>
+      </div>
+      <div style="margin-top:6px">
+        <button id="locBtn">📍 現在地を使用</button>
+      </div>
+      <div style="margin-top:8px">
+        <label>プリセット</label>
+        <div class="presets">
+          <button data-lat="35.6812" data-lon="139.7671">東京駅</button>
+          <button data-lat="35.6895" data-lon="139.6917">新宿</button>
+          <button data-lat="35.0116" data-lon="135.7681">京都駅</button>
+          <button data-lat="34.6937" data-lon="135.5023">大阪駅</button>
+          <button data-lat="43.0686" data-lon="141.3507">札幌</button>
+          <button data-lat="26.2124" data-lon="127.6792">那覇</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>地図でクリックして選択</h3>
+      <div id="minimap"></div>
+    </div>
+
+    <div class="card">
+      <h3>表示範囲</h3>
+      <input type="range" id="rangeKm" min="0.3" max="3.0" step="0.1" value="1.0"/>
+      <div id="kmLabel">1.0 km</div>
+    </div>
+
+    <div class="card">
+      <h3>表示設定</h3>
+      <div class="toggle-row">
+        <input type="checkbox" id="toggleBuildings" checked/>
+        <label for="toggleBuildings" style="margin:0">建物を表示 (OSM)</label>
+      </div>
+    </div>
+
+    <div id="progressWrap">
+      <div id="progressTrack"><div id="progressBar"></div></div>
+      <div id="progressLabel">準備中…</div>
+    </div>
+
+    <button id="runBtn">🌍 3D表示を生成</button>
+
+    <div class="card">
+      <h3>建物の凡例</h3>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#d4a96a"></div>住宅・集合住宅</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#7ab8d4"></div>商業・オフィス</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#a0a0a0"></div>工業・倉庫</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#e8c87a"></div>宗教施設</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#c8c0b8"></div>その他</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="viewport">
+    <canvas id="glCanvas"></canvas>
+    <div class="hint">
+      左ドラッグ: 回転 &nbsp;|&nbsp; 右ドラッグ/中ドラッグ: 移動<br>
+      スクロール: ズーム &nbsp;|&nbsp; データ: 国土地理院・OpenStreetMap
+    </div>
+  </div>
+</div>
+
+<!-- Three.js r0.128.0 UMD (works with file:// and https://) -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<!-- Leaflet -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script src="js/coords.js"></script>
+<script src="js/terrain.js"></script>
+<script src="js/buildings.js"></script>
+<script src="js/scene.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
