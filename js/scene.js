@@ -4,34 +4,41 @@ let renderer, scene, camera, controls, animId;
 
 function initScene(canvas) {
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputEncoding = THREE.sRGBEncoding;
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x87ceeb);
-  scene.fog = new THREE.Fog(0x87ceeb, 1200, 4000);
+  scene.fog = new THREE.FogExp2(0xc8e8f8, 0.00025);
 
-  camera = new THREE.PerspectiveCamera(55, 1, 1, 8000);
+  camera = new THREE.PerspectiveCamera(50, 1, 1, 10000);
 
   controls = new THREE.OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
-  controls.minDistance = 20;
-  controls.maxDistance = 5000;
-  controls.maxPolarAngle = Math.PI / 2 - 0.02;
+  controls.dampingFactor = 0.07;
+  controls.minDistance = 15;
+  controls.maxDistance = 6000;
+  controls.maxPolarAngle = Math.PI / 2 - 0.01;
 
-  // ambient + directional sun
-  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-  const sun = new THREE.DirectionalLight(0xfff8e7, 1.1);
-  sun.position.set(500, 800, 300);
+  // hemisphere sky/ground light
+  scene.add(new THREE.HemisphereLight(0xc8e8ff, 0x886644, 0.6));
+  // main sun
+  const sun = new THREE.DirectionalLight(0xfff4e0, 1.2);
+  sun.position.set(600, 900, 400);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 3000;
-  sun.shadow.camera.left = sun.shadow.camera.bottom = -1200;
-  sun.shadow.camera.right = sun.shadow.camera.top = 1200;
+  sun.shadow.camera.far = 4000;
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -1500;
+  sun.shadow.camera.right = sun.shadow.camera.top = 1500;
+  sun.shadow.bias = -0.0003;
   scene.add(sun);
+  // soft fill from opposite side
+  const fill = new THREE.DirectionalLight(0x9ab8d8, 0.35);
+  fill.position.set(-400, 300, -200);
+  scene.add(fill);
 
   window.addEventListener('resize', onResize);
   onResize();
@@ -41,7 +48,7 @@ function initScene(canvas) {
 function onResize() {
   const el = renderer.domElement.parentElement;
   const w = el.clientWidth || window.innerWidth;
-  const h = el.clientHeight || window.innerHeight;
+  const h = el.clientHeight || (window.innerHeight - 44);
   renderer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
@@ -49,12 +56,11 @@ function onResize() {
 
 function startLoop() {
   if (animId != null) cancelAnimationFrame(animId);
-  function loop() {
+  (function loop() {
     animId = requestAnimationFrame(loop);
     controls.update();
     renderer.render(scene, camera);
-  }
-  loop();
+  })();
 }
 
 function clearSceneObjects() {
@@ -66,13 +72,12 @@ function clearSceneObjects() {
     scene.remove(obj);
     if (obj.geometry) obj.geometry.dispose();
     if (obj.material) {
-      if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
-      else obj.material.dispose();
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      mats.forEach(m => { if (m.map) m.map.dispose(); m.dispose(); });
     }
   });
 }
 
-// vertExag: vertical exaggeration factor (1 = real scale, 2-3 = helps flat areas look 3D)
 function buildTerrain(grid, n, xSize, zSize, texDataUrl, vertExag) {
   const geo = new THREE.PlaneGeometry(xSize, zSize, n - 1, n - 1);
   geo.rotateX(-Math.PI / 2);
@@ -97,12 +102,12 @@ function placeCameraOverTerrain(grid, n, xSize, zSize, vertExag) {
   const cx = xSize / 2, cz = zSize / 2;
   const midElev = grid[Math.floor(n / 2)][Math.floor(n / 2)] * vertExag;
   const span = Math.max(xSize, zSize);
-  // oblique 45-degree view from south-east, looking north-west
+  // 45° oblique view from south-east, looking north-west — shows terrain + buildings
   camera.position.set(
-    cx + span * 0.4,
-    midElev + span * 0.55,
-    cz + span * 0.6
+    cx + span * 0.45,
+    midElev + span * 0.52,
+    cz + span * 0.65
   );
-  controls.target.set(cx, midElev + span * 0.02, cz);
+  controls.target.set(cx, midElev + 10, cz);
   controls.update();
 }
