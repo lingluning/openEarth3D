@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>PLATEAU 3D City Viewer</title>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.114.0/Build/Cesium/Cesium.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.114.0/Build/Cesium/Widgets/widgets.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a14}
+#cesiumContainer{width:100%;height:100%}
+
+/* hide Cesium's default credit bar overlap */
+.cesium-widget-credits{display:none!important}
+
+#panel{
+  position:absolute;top:14px;left:14px;
+  background:rgba(16,24,50,0.94);
+  border:1px solid #0f3460;border-radius:10px;
+  padding:14px 16px;width:270px;color:#e0e0f0;
+  backdrop-filter:blur(10px);z-index:999;
+}
+#panel h2{font-size:1.05rem;font-weight:700;color:#4fc3f7;margin-bottom:10px}
+#panel h2 span{font-size:0.78rem;font-weight:400;color:#90caf9;margin-left:4px}
+.section-title{font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;
+  color:#90caf9;margin:10px 0 4px}
+label{font-size:0.82rem;color:#b0c4de;display:block;margin-bottom:3px}
+select{
+  width:100%;padding:6px 8px;
+  background:#1a1a2e;border:1px solid #0f3460;
+  color:#e0e0f0;border-radius:5px;font-size:0.83rem;cursor:pointer;outline:none;
+}
+select:focus{border-color:#4fc3f7}
+#loadBtn{
+  width:100%;padding:9px;margin-top:10px;
+  background:linear-gradient(135deg,#0066cc,#4fc3f7);
+  border:none;color:#fff;font-size:0.92rem;font-weight:700;
+  border-radius:7px;cursor:pointer;transition:opacity .2s;
+}
+#loadBtn:hover{opacity:.9}
+#loadBtn:disabled{opacity:.45;cursor:not-allowed}
+
+#statusBar{
+  margin-top:8px;padding:6px 8px;
+  background:#0a0f20;border-radius:5px;
+  font-size:0.75rem;color:#81d4fa;min-height:30px;line-height:1.4;
+}
+
+.info-box{
+  margin-top:10px;padding:8px;
+  background:#0f1a30;border-radius:6px;
+  font-size:0.72rem;color:#7a9ab8;line-height:1.6;
+}
+.info-box a{color:#4fc3f7;text-decoration:none}
+.info-box a:hover{text-decoration:underline}
+
+.legend{display:flex;flex-direction:column;gap:3px;margin-top:6px}
+.legend-row{display:flex;align-items:center;gap:6px;font-size:0.73rem;color:#b0c4de}
+.lg-dot{width:11px;height:11px;border-radius:2px;flex-shrink:0}
+
+#hint{
+  position:absolute;bottom:14px;right:14px;
+  background:rgba(16,24,50,0.82);border:1px solid #0f3460;
+  border-radius:7px;padding:7px 12px;
+  font-size:0.72rem;color:rgba(200,220,255,.6);
+  line-height:1.7;text-align:right;z-index:999;
+  backdrop-filter:blur(6px);
+}
+#backBtn{
+  position:absolute;bottom:14px;left:14px;
+  background:rgba(16,24,50,0.88);border:1px solid #4fc3f7;
+  color:#4fc3f7;border-radius:6px;padding:6px 14px;
+  font-size:0.8rem;cursor:pointer;z-index:999;
+  transition:background .15s;
+}
+#backBtn:hover{background:#4fc3f7;color:#0a0f20}
+</style>
+</head>
+<body>
+
+<div id="cesiumContainer"></div>
+
+<div id="panel">
+  <h2>🏙️ PLATEAU <span>3D City Viewer</span></h2>
+
+  <div class="section-title">都市・地区を選択</div>
+  <select id="citySelect">
+    <optgroup label="東京都">
+      <option value="13101">千代田区（2023年・LOD1）</option>
+      <option value="13102">中央区（動的取得）</option>
+      <option value="13103">港区（動的取得）</option>
+      <option value="13104">新宿区（動的取得）</option>
+      <option value="13105">文京区（動的取得）</option>
+      <option value="13113">渋谷区（動的取得）</option>
+    </optgroup>
+    <optgroup label="その他">
+      <option value="01101">札幌市中央区（2020年・LOD1）</option>
+      <option value="27100">大阪市（動的取得）</option>
+      <option value="23100">名古屋市（動的取得）</option>
+    </optgroup>
+  </select>
+
+  <button id="loadBtn">📡 PLATEAUデータを読み込む</button>
+  <div id="statusBar">エリアを選択してボタンを押してください</div>
+
+  <div class="section-title" style="margin-top:12px">建物の高さ</div>
+  <div class="legend">
+    <div class="legend-row"><div class="lg-dot" style="background:#8ab8cc"></div>高層ビル（50m以上）</div>
+    <div class="legend-row"><div class="lg-dot" style="background:#d4a96a"></div>中層建物（20-50m）</div>
+    <div class="legend-row"><div class="lg-dot" style="background:#c8c0b4"></div>低層建物（20m未満）</div>
+  </div>
+
+  <div class="info-box">
+    データ: <a href="https://www.mlit.go.jp/plateau/" target="_blank">国土交通省 PLATEAU</a>（CC BY 4.0）<br>
+    航空写真: 国土地理院シームレス写真<br>
+    ※ LOD1 = 形状のみ、LOD2 = 屋根形状あり
+  </div>
+</div>
+
+<div id="hint">
+  左ドラッグ: 視点回転<br>
+  右ドラッグ: 移動<br>
+  スクロール: ズーム<br>
+  中クリック: チルト
+</div>
+
+<button id="backBtn" onclick="location.href='index.html'">← openEarth3D</button>
+
+<script>
+// ── Known fallback tileset URLs (used when API is unavailable) ─────────────
+const KNOWN_TILESETS = {
+  '13101': 'https://assets.cms.plateau.reearth.io/assets/0e/e5948a-e95c-4e31-be85-1f8c066ed996/13101_chiyoda-ku_pref_2023_citygml_1_op_bldg_3dtiles_13101_chiyoda-ku_lod1/tileset.json',
+  '01101': 'https://assets.cms.plateau.reearth.io/assets/b8/314602-4b39-4d5f-be2d-a0b17a3e3c21/01100_sapporo-shi_city_2020_citygml_6_op_bldg_3dtiles_01101_chuo-ku_lod1/tileset.json',
+};
+
+// City center coordinates for camera positioning
+const CITY_CENTERS = {
+  '13101': { lon: 139.753, lat: 35.694 }, // 千代田区
+  '13102': { lon: 139.774, lat: 35.668 }, // 中央区
+  '13103': { lon: 139.748, lat: 35.658 }, // 港区
+  '13104': { lon: 139.699, lat: 35.693 }, // 新宿区
+  '13105': { lon: 139.752, lat: 35.708 }, // 文京区
+  '13113': { lon: 139.700, lat: 35.663 }, // 渋谷区
+  '01101': { lon: 141.347, lat: 43.063 }, // 札幌中央
+  '27100': { lon: 135.502, lat: 34.694 }, // 大阪
+  '23100': { lon: 136.906, lat: 35.181 }, // 名古屋
+};
+
+// ── Cesium viewer init ─────────────────────────────────────────────────────
+// No Ion token needed: we use GSI imagery (not Cesium Ion) + PLATEAU CDN tiles
+const viewer = new Cesium.Viewer('cesiumContainer', {
+  imageryProvider: new Cesium.UrlTemplateImageryProvider({
+    url: 'https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg',
+    maximumLevel: 18,
+    credit: new Cesium.Credit('国土地理院', false),
+  }),
+  terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+  animation: false,
+  timeline: false,
+  baseLayerPicker: false,
+  geocoder: false,
+  homeButton: false,
+  sceneModePicker: false,
+  navigationHelpButton: false,
+  fullscreenButton: false,
+  infoBox: false,
+  selectionIndicator: false,
+  shadows: true,
+  contextOptions: { requestWebgl2: true },
+});
+
+// Visual quality improvements
+viewer.scene.globe.enableLighting = true;
+viewer.scene.globe.atmosphereLightIntensity = 10.0;
+viewer.scene.fog.enabled = true;
+viewer.scene.fog.density = 0.0002;
+viewer.shadowMap.softShadows = true;
+viewer.shadowMap.size = 2048;
+viewer.scene.highDynamicRange = false;
+
+// Initial camera: oblique view over central Tokyo
+viewer.camera.setView({
+  destination: Cesium.Cartesian3.fromDegrees(139.753, 35.688, 1800),
+  orientation: {
+    heading: Cesium.Math.toRadians(-20),
+    pitch: Cesium.Math.toRadians(-40),
+    roll: 0,
+  }
+});
+
+// ── PLATEAU Catalog API ────────────────────────────────────────────────────
+async function fetchTilesetFromAPI(cityCode) {
+  const query = `{
+    datasets(input: {cityCode: "${cityCode}", type: "plateau"}) {
+      items {
+        items { name url type }
+      }
+    }
+  }`;
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), 6000);
+  const res = await fetch('https://api.plateauview.mlit.go.jp/datacatalog/graphql', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+    signal: ctrl.signal,
+  });
+  const json = await res.json();
+  const items = (json?.data?.datasets?.items || []).flatMap(d => d.items || []);
+  const bldg = items.find(i => i.url?.includes('bldg') && i.url?.endsWith('tileset.json'));
+  return bldg?.url || null;
+}
+
+// ── Building color style by height ────────────────────────────────────────
+function makeBuildingStyle() {
+  return new Cesium.Cesium3DTileStyle({
+    color: {
+      conditions: [
+        ['${height} >= 80',  "color('#6aaec8', 0.95)"],  // skyscraper: glass blue
+        ['${height} >= 50',  "color('#8ab8cc', 0.95)"],  // high-rise: teal
+        ['${height} >= 30',  "color('#c8a870', 0.95)"],  // mid-rise: warm
+        ['${height} >= 15',  "color('#c8bfb0', 0.95)"],  // low-mid
+        ['true',             "color('#d0c8bc', 0.95)"],  // low-rise: concrete
+      ]
+    }
+  });
+}
+
+// ── Load PLATEAU tileset ───────────────────────────────────────────────────
+let currentTileset = null;
+
+document.getElementById('loadBtn').addEventListener('click', async () => {
+  const cityCode = document.getElementById('citySelect').value;
+  const btn = document.getElementById('loadBtn');
+  const status = document.getElementById('statusBar');
+
+  btn.disabled = true;
+
+  // Remove previous
+  if (currentTileset) {
+    viewer.scene.primitives.remove(currentTileset);
+    currentTileset = null;
+  }
+
+  // Try API first, then fallback to known URLs
+  status.textContent = '📡 PLATEAUカタログを検索中…';
+  let url = null;
+  try {
+    url = await fetchTilesetFromAPI(cityCode);
+    if (url) status.textContent = '✅ データURL取得成功、3Dタイルを読み込み中…';
+  } catch {}
+
+  if (!url) {
+    url = KNOWN_TILESETS[cityCode] || null;
+    if (url) status.textContent = '⚡ キャッシュURLで読み込み中…';
+  }
+
+  if (!url) {
+    status.textContent = '⚠️ このエリアのPLATEAUデータは現在未収録です。千代田区または札幌をお試しください。';
+    btn.disabled = false;
+    return;
+  }
+
+  try {
+    status.textContent = '🏗️ 建物モデルを構築中（初回は数秒かかります）…';
+
+    const tileset = await Cesium.Cesium3DTileset.fromUrl(url, {
+      shadows: Cesium.ShadowMode.ENABLED,
+      maximumScreenSpaceError: 8, // higher = more aggressive LOD
+    });
+
+    tileset.style = makeBuildingStyle();
+    currentTileset = viewer.scene.primitives.add(tileset);
+
+    // Fly to tileset with oblique angle
+    const center = CITY_CENTERS[cityCode];
+    if (center) {
+      await viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(center.lon, center.lat - 0.006, 900),
+        orientation: {
+          heading: Cesium.Math.toRadians(-15),
+          pitch: Cesium.Math.toRadians(-38),
+          roll: 0,
+        },
+        duration: 2.5,
+      });
+    } else {
+      await viewer.flyTo(tileset, {
+        duration: 2.5,
+        offset: new Cesium.HeadingPitchRange(
+          Cesium.Math.toRadians(-20),
+          Cesium.Math.toRadians(-38),
+          900
+        )
+      });
+    }
+
+    status.textContent = `✅ PLATEAU建物モデルを表示中 — ドラッグで視点操作できます`;
+  } catch (e) {
+    status.textContent = '❌ 読み込み失敗: ' + (e.message || String(e));
+    console.error('PLATEAU load error:', e);
+  }
+
+  btn.disabled = false;
+});
+</script>
+</body>
+</html>
