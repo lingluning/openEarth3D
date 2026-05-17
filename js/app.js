@@ -4,7 +4,6 @@ const GRID_N = 32;
 const PHOTO_ZOOM = 17;
 
 let leafletMap, leafletMarker;
-let currentBB = null;
 
 function initMap() {
   leafletMap = L.map('minimap').setView([35.6812, 139.7671], 13);
@@ -19,8 +18,7 @@ function initMap() {
 
 function setCenter(lat, lon) {
   const kmVal = parseFloat(document.getElementById('rangeKm').value) || 1.0;
-  const bb = bboxFromCenter(lat, lon, kmVal);
-  currentBB = bb;
+  bboxFromCenter(lat, lon, kmVal); // validate
 
   if (leafletMarker) leafletMap.removeLayer(leafletMarker);
   leafletMarker = L.marker([lat, lon]).addTo(leafletMap);
@@ -31,10 +29,8 @@ function setCenter(lat, lon) {
 }
 
 function setProgress(pct, label) {
-  const bar = document.getElementById('progressBar');
-  const txt = document.getElementById('progressLabel');
-  bar.style.width = (pct * 100).toFixed(1) + '%';
-  txt.textContent = label;
+  document.getElementById('progressBar').style.width = (pct * 100).toFixed(1) + '%';
+  document.getElementById('progressLabel').textContent = label;
 }
 
 function showProgress(visible) {
@@ -46,6 +42,7 @@ async function run() {
   const lon = parseFloat(document.getElementById('lonInput').value);
   const km  = parseFloat(document.getElementById('rangeKm').value) || 1.0;
   const showBuildings = document.getElementById('toggleBuildings').checked;
+  const vertExag = parseFloat(document.getElementById('vertExag').value) || 2.0;
 
   if (isNaN(lat) || isNaN(lon)) { alert('緯度経度を入力してください'); return; }
 
@@ -54,7 +51,6 @@ async function run() {
   setProgress(0, '地形データ取得中…');
 
   const bb = bboxFromCenter(lat, lon, km);
-  currentBB = bb;
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
 
   let elevGrid;
@@ -81,9 +77,9 @@ async function run() {
   setProgress(0.7, '3Dシーン構築中…');
   clearSceneObjects();
 
-  const terrainMesh = buildTerrain(elevGrid, GRID_N, xSize, zSize, photoUrl);
+  const terrainMesh = buildTerrain(elevGrid, GRID_N, xSize, zSize, photoUrl, vertExag);
   scene.add(terrainMesh);
-  placeCameraOverTerrain(elevGrid, GRID_N, xSize, zSize);
+  placeCameraOverTerrain(elevGrid, GRID_N, xSize, zSize, vertExag);
 
   if (showBuildings) {
     setProgress(0.75, '建物データ取得中…');
@@ -91,7 +87,7 @@ async function run() {
       const elements = await fetchBuildings(bb);
       setProgress(0.88, '建物3D生成中…');
       const parsed = parseBuildings(elements, bb);
-      const group = createBuildingGroup(parsed, bb, elevGrid, GRID_N);
+      const group = createBuildingGroup(parsed, bb, elevGrid, GRID_N, vertExag);
       scene.add(group);
     } catch (e) {
       console.warn('建物取得失敗:', e);
@@ -113,8 +109,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('locBtn').addEventListener('click', () => {
     if (!navigator.geolocation) { alert('Geolocation not supported'); return; }
     navigator.geolocation.getCurrentPosition(pos => {
-      document.getElementById('latInput').value = pos.coords.latitude.toFixed(6);
-      document.getElementById('lonInput').value = pos.coords.longitude.toFixed(6);
       setCenter(pos.coords.latitude, pos.coords.longitude);
     }, () => alert('位置情報の取得に失敗しました'));
   });
@@ -123,14 +117,13 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('kmLabel').textContent = parseFloat(this.value).toFixed(1) + ' km';
   });
 
-  // preset buttons
+  document.getElementById('vertExag').addEventListener('input', function () {
+    document.getElementById('exagLabel').textContent = parseFloat(this.value).toFixed(1) + 'x';
+  });
+
   document.querySelectorAll('[data-lat]').forEach(btn => {
     btn.addEventListener('click', () => {
-      const lat = parseFloat(btn.dataset.lat);
-      const lon = parseFloat(btn.dataset.lon);
-      document.getElementById('latInput').value = lat.toFixed(6);
-      document.getElementById('lonInput').value = lon.toFixed(6);
-      setCenter(lat, lon);
+      setCenter(parseFloat(btn.dataset.lat), parseFloat(btn.dataset.lon));
     });
   });
 });
