@@ -37,60 +37,142 @@ function parseBuildings(elements, bb) {
   return buildings;
 }
 
-function getBuildingColor(tags) {
+// Cache facade textures by color key
+const _facadeCache = {};
+
+function makeFacadeTexture(wallHex, type) {
+  const key = wallHex + '_' + type;
+  if (_facadeCache[key]) return _facadeCache[key];
+
+  const W = 256, H = 512;
+  const cvs = document.createElement('canvas');
+  cvs.width = W; cvs.height = H;
+  const ctx = cvs.getContext('2d');
+
+  const r = (wallHex >> 16) & 0xff;
+  const g = (wallHex >> 8) & 0xff;
+  const b = wallHex & 0xff;
+
+  // base wall
+  ctx.fillStyle = `rgb(${r},${g},${b})`;
+  ctx.fillRect(0, 0, W, H);
+
+  // horizontal floor lines (concrete)
+  ctx.strokeStyle = `rgba(0,0,0,0.12)`;
+  ctx.lineWidth = 1;
+  for (let y = 22; y < H; y += 22) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // window grid
+  const COLS = type === 'glass' ? 4 : 5;
+  const ROWS = type === 'glass' ? 8 : 10;
+  const padX = 16, padY = 22;
+  const stepX = (W - padX * 2) / COLS;
+  const stepY = (H - padY * 2) / ROWS;
+  const winW = stepX * (type === 'glass' ? 0.78 : 0.60);
+  const winH = stepY * (type === 'glass' ? 0.72 : 0.55);
+
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      const wx = padX + col * stepX + (stepX - winW) / 2;
+      const wy = padY + row * stepY + (stepY - winH) / 2;
+
+      if (type === 'glass') {
+        // curtain wall: full blue-green glass
+        const grad = ctx.createLinearGradient(wx, wy, wx + winW, wy + winH);
+        grad.addColorStop(0, 'rgba(140,210,240,0.88)');
+        grad.addColorStop(0.5, 'rgba(100,180,220,0.75)');
+        grad.addColorStop(1, 'rgba(60,140,190,0.82)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(wx, wy, winW, winH);
+        // reflection highlight
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        ctx.fillRect(wx + 2, wy + 2, winW * 0.35, winH * 0.4);
+      } else {
+        const lit = Math.random() > 0.18;
+        ctx.fillStyle = lit ? 'rgba(200,228,255,0.80)' : 'rgba(22,30,50,0.86)';
+        ctx.fillRect(wx, wy, winW, winH);
+        if (lit) {
+          // window divider
+          ctx.strokeStyle = 'rgba(180,210,240,0.6)';
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(wx + winW * 0.5, wy);
+          ctx.lineTo(wx + winW * 0.5, wy + winH);
+          ctx.stroke();
+        }
+      }
+      // window frame
+      ctx.strokeStyle = 'rgba(0,0,0,0.22)';
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(wx, wy, winW, winH);
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(cvs);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  _facadeCache[key] = tex;
+  return tex;
+}
+
+function getBuildingStyle(tags) {
   const t = tags.building || '';
-  if (t === 'residential' || t === 'house' || t === 'apartments') return 0xd4a96a;
-  if (t === 'commercial' || t === 'retail' || t === 'office') return 0x7ab8d4;
-  if (t === 'industrial' || t === 'warehouse') return 0xa0a0a0;
-  if (t === 'church' || t === 'cathedral' || t === 'temple') return 0xe8c87a;
-  return 0xc8c0b8;
+  if (t === 'commercial' || t === 'retail' || t === 'office' || t === 'civic')
+    return { wall: 0x8ab8cc, roof: 0x3a6070, type: 'glass' };
+  if (t === 'residential' || t === 'house' || t === 'apartments' || t === 'dormitory')
+    return { wall: 0xd8b87a, roof: 0x6e4e28, type: 'concrete' };
+  if (t === 'industrial' || t === 'warehouse' || t === 'factory')
+    return { wall: 0xa8a8a0, roof: 0x505048, type: 'concrete' };
+  if (t === 'church' || t === 'cathedral' || t === 'temple' || t === 'shrine')
+    return { wall: 0xe0cc80, roof: 0x5a4a20, type: 'concrete' };
+  return { wall: 0xc8c0b4, roof: 0x585048, type: 'concrete' };
 }
 
 function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
 
-  // local XZ coords
   const pts2d = building.coords.map(c => ({
     x: toLocalX(c.lon, bb),
     z: toLocalZ(c.lat, bb)
   }));
 
-  // signed area in XZ space
+  // signed area in XZ; for correct shape winding after y=-z trick, need area2 < 0
   const area2 = pts2d.reduce((s, p, i) => {
     const q = pts2d[(i + 1) % pts2d.length];
     return s + (p.x * q.z - q.x * p.z);
   }, 0);
-  // for correct shape winding with y=-z trick: need area2 < 0
   if (area2 > 0) pts2d.reverse();
 
-  // Three.js Shape is in XY plane; we store (x, -z) so that after
-  // applyMatrix4(rotateX(-PI/2)) the result lands in world XZ correctly:
-  //   shape(x, -z, 0)  →  world(x, 0,  z)  ✓
-  //   extrusion(x, -z, h) →  world(x, h,  z)  ✓
+  // shape: (x, -z) so applyMatrix4(rotX(-PI/2)) maps correctly to world XZ
   const shapePts = pts2d.map(p => new THREE.Vector2(p.x, -p.z));
   const shape = new THREE.Shape(shapePts);
 
-  // building base elevation (with vertical exaggeration)
+  // elevation at building centroid
   const cx = pts2d.reduce((s, p) => s + p.x, 0) / pts2d.length;
   const cz = pts2d.reduce((s, p) => s + p.z, 0) / pts2d.length;
   const rx = Math.max(0, Math.min(1, cx / xSize));
   const rz = Math.max(0, Math.min(1, cz / zSize));
   const baseElev = getElevAt(elevGrid, gridN, rx, rz) * vertExag;
 
-  const geo = new THREE.ExtrudeGeometry(shape, {
-    depth: building.height,
-    bevelEnabled: false
-  });
-  // rotate geometry (not mesh) so extrusion axis Z → world Y (up)
-  // and shape Y=-z → world Z (south)
+  const style = getBuildingStyle(building.tags);
+
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: building.height, bevelEnabled: false });
+  // fix coordinate system: shape XY → world XZ, extrusion Z → world Y (up)
   geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
 
-  const color = getBuildingColor(building.tags);
-  const mat = new THREE.MeshLambertMaterial({ color });
-  const mesh = new THREE.Mesh(geo, mat);
+  const facadeTex = makeFacadeTexture(style.wall, style.type);
+  const wallMat = new THREE.MeshPhongMaterial({
+    map: facadeTex,
+    shininess: style.type === 'glass' ? 60 : 20,
+    specular: style.type === 'glass' ? new THREE.Color(0x88ccee) : new THREE.Color(0x222222)
+  });
+  const roofMat = new THREE.MeshLambertMaterial({ color: style.roof });
+
+  const mesh = new THREE.Mesh(geo, [wallMat, roofMat]);
   mesh.position.set(0, baseElev, 0);
-  mesh.receiveShadow = true;
   mesh.castShadow = true;
+  mesh.receiveShadow = true;
   return mesh;
 }
 
@@ -98,8 +180,7 @@ function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag) {
   const group = new THREE.Group();
   for (const b of buildings) {
     try {
-      const mesh = buildingToMesh(b, bb, elevGrid, gridN, vertExag);
-      group.add(mesh);
+      group.add(buildingToMesh(b, bb, elevGrid, gridN, vertExag));
     } catch {}
   }
   return group;
