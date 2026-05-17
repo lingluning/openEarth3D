@@ -10,7 +10,7 @@ function initScene(canvas) {
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x87ceeb);
-  scene.fog = new THREE.Fog(0x87ceeb, 800, 3000);
+  scene.fog = new THREE.Fog(0x87ceeb, 1200, 4000);
 
   camera = new THREE.PerspectiveCamera(55, 1, 1, 8000);
 
@@ -18,12 +18,12 @@ function initScene(canvas) {
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   controls.minDistance = 20;
-  controls.maxDistance = 4000;
+  controls.maxDistance = 5000;
   controls.maxPolarAngle = Math.PI / 2 - 0.02;
 
   // ambient + directional sun
-  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-  const sun = new THREE.DirectionalLight(0xfff8e7, 1.0);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const sun = new THREE.DirectionalLight(0xfff8e7, 1.1);
   sun.position.set(500, 800, 300);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -39,8 +39,9 @@ function initScene(canvas) {
 }
 
 function onResize() {
-  const w = renderer.domElement.parentElement.clientWidth;
-  const h = renderer.domElement.parentElement.clientHeight;
+  const el = renderer.domElement.parentElement;
+  const w = el.clientWidth || window.innerWidth;
+  const h = el.clientHeight || window.innerHeight;
   renderer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
@@ -57,7 +58,6 @@ function startLoop() {
 }
 
 function clearSceneObjects() {
-  // remove everything except lights
   const toRemove = [];
   scene.traverse(obj => {
     if (obj !== scene && !(obj instanceof THREE.Light)) toRemove.push(obj);
@@ -72,13 +72,14 @@ function clearSceneObjects() {
   });
 }
 
-function buildTerrain(grid, n, xSize, zSize, texDataUrl) {
+// vertExag: vertical exaggeration factor (1 = real scale, 2-3 = helps flat areas look 3D)
+function buildTerrain(grid, n, xSize, zSize, texDataUrl, vertExag) {
   const geo = new THREE.PlaneGeometry(xSize, zSize, n - 1, n - 1);
   geo.rotateX(-Math.PI / 2);
   const pos = geo.attributes.position;
   for (let i = 0; i < pos.count; i++) {
     const c = i % n, r = Math.floor(i / n);
-    pos.setY(i, grid[r][c]);
+    pos.setY(i, grid[r][c] * vertExag);
   }
   pos.needsUpdate = true;
   geo.computeVertexNormals();
@@ -88,16 +89,20 @@ function buildTerrain(grid, n, xSize, zSize, texDataUrl) {
   const mat = new THREE.MeshLambertMaterial({ map: tex });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
-  // PlaneGeometry is centered; shift so origin = NW corner
   mesh.position.set(xSize / 2, 0, zSize / 2);
   return mesh;
 }
 
-function placeCameraOverTerrain(grid, n, xSize, zSize) {
+function placeCameraOverTerrain(grid, n, xSize, zSize, vertExag) {
   const cx = xSize / 2, cz = zSize / 2;
-  const midElev = grid[Math.floor(n / 2)][Math.floor(n / 2)];
-  const dist = Math.max(xSize, zSize) * 0.7;
-  camera.position.set(cx, midElev + dist * 0.6, cz + dist * 0.5);
-  controls.target.set(cx, midElev, cz);
+  const midElev = grid[Math.floor(n / 2)][Math.floor(n / 2)] * vertExag;
+  const span = Math.max(xSize, zSize);
+  // oblique 45-degree view from south-east, looking north-west
+  camera.position.set(
+    cx + span * 0.4,
+    midElev + span * 0.55,
+    cz + span * 0.6
+  );
+  controls.target.set(cx, midElev + span * 0.02, cz);
   controls.update();
 }
