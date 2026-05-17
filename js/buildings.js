@@ -46,51 +46,59 @@ function getBuildingColor(tags) {
   return 0xc8c0b8;
 }
 
-function buildingToMesh(building, bb, elevGrid, gridN) {
-  const pts = building.coords.map(c => {
-    const x = toLocalX(c.lon, bb);
-    const z = toLocalZ(c.lat, bb);
-    return new THREE.Vector2(x, z);
-  });
-
-  // ensure CCW winding for Three.js shape
-  const area2 = pts.reduce((s, p, i) => {
-    const q = pts[(i + 1) % pts.length];
-    return s + (p.x * q.y - q.x * p.y);
-  }, 0);
-  if (area2 < 0) pts.reverse();
-
-  const shape = new THREE.Shape(pts);
+function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
 
-  const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
-  const cz = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+  // local XZ coords
+  const pts2d = building.coords.map(c => ({
+    x: toLocalX(c.lon, bb),
+    z: toLocalZ(c.lat, bb)
+  }));
+
+  // signed area in XZ space
+  const area2 = pts2d.reduce((s, p, i) => {
+    const q = pts2d[(i + 1) % pts2d.length];
+    return s + (p.x * q.z - q.x * p.z);
+  }, 0);
+  // for correct shape winding with y=-z trick: need area2 < 0
+  if (area2 > 0) pts2d.reverse();
+
+  // Three.js Shape is in XY plane; we store (x, -z) so that after
+  // applyMatrix4(rotateX(-PI/2)) the result lands in world XZ correctly:
+  //   shape(x, -z, 0)  →  world(x, 0,  z)  ✓
+  //   extrusion(x, -z, h) →  world(x, h,  z)  ✓
+  const shapePts = pts2d.map(p => new THREE.Vector2(p.x, -p.z));
+  const shape = new THREE.Shape(shapePts);
+
+  // building base elevation (with vertical exaggeration)
+  const cx = pts2d.reduce((s, p) => s + p.x, 0) / pts2d.length;
+  const cz = pts2d.reduce((s, p) => s + p.z, 0) / pts2d.length;
   const rx = Math.max(0, Math.min(1, cx / xSize));
   const rz = Math.max(0, Math.min(1, cz / zSize));
-  const baseElev = getElevAt(elevGrid, gridN, rx, rz);
+  const baseElev = getElevAt(elevGrid, gridN, rx, rz) * vertExag;
 
   const geo = new THREE.ExtrudeGeometry(shape, {
     depth: building.height,
     bevelEnabled: false
   });
+  // rotate geometry (not mesh) so extrusion axis Z → world Y (up)
+  // and shape Y=-z → world Z (south)
+  geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
 
   const color = getBuildingColor(building.tags);
   const mat = new THREE.MeshLambertMaterial({ color });
   const mesh = new THREE.Mesh(geo, mat);
-
-  // ExtrudeGeometry extrudes along Z; rotate so extrusion goes up (Y)
-  mesh.rotation.x = -Math.PI / 2;
   mesh.position.set(0, baseElev, 0);
   mesh.receiveShadow = true;
   mesh.castShadow = true;
   return mesh;
 }
 
-function createBuildingGroup(buildings, bb, elevGrid, gridN) {
+function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag) {
   const group = new THREE.Group();
   for (const b of buildings) {
     try {
-      const mesh = buildingToMesh(b, bb, elevGrid, gridN);
+      const mesh = buildingToMesh(b, bb, elevGrid, gridN, vertExag);
       group.add(mesh);
     } catch {}
   }
