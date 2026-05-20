@@ -213,15 +213,16 @@ async function fetchTilesetFromAPI(cityCode) {
 }
 
 // ── Building color style by height ────────────────────────────────────────
+// Use defined() guard because PLATEAU LOD1 may not expose a "height" property
 function makeBuildingStyle() {
   return new Cesium.Cesium3DTileStyle({
     color: {
       conditions: [
-        ['${height} >= 80',  "color('#6aaec8', 0.95)"],  // skyscraper: glass blue
-        ['${height} >= 50',  "color('#8ab8cc', 0.95)"],  // high-rise: teal
-        ['${height} >= 30',  "color('#c8a870', 0.95)"],  // mid-rise: warm
-        ['${height} >= 15',  "color('#c8bfb0', 0.95)"],  // low-mid
-        ['true',             "color('#d0c8bc', 0.95)"],  // low-rise: concrete
+        ['defined(${height}) && ${height} >= 80', "color('#6aaec8', 0.95)"],
+        ['defined(${height}) && ${height} >= 50', "color('#8ab8cc', 0.95)"],
+        ['defined(${height}) && ${height} >= 30', "color('#c8a870', 0.95)"],
+        ['defined(${height}) && ${height} >= 15', "color('#c8bfb0', 0.95)"],
+        ['true',                                   "color('#d0c8bc', 0.95)"],
       ]
     }
   });
