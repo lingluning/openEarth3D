@@ -1,8 +1,8 @@
 'use strict';
 
 // 128×128 mesh using DEM PNG tiles → ~10m resolution, comparable to Google Earth
-const GRID_N   = 128;
-const PHOTO_ZOOM = 17;
+const GRID_N     = 128;
+const PHOTO_ZOOM = 19; // ESRI supports zoom 19 (~30cm/px); GSI caps at 18 (~60cm/px)
 
 let leafletMap, leafletMarker;
 
@@ -36,7 +36,8 @@ async function run() {
   const lon = parseFloat(document.getElementById('lonInput').value);
   const km  = parseFloat(document.getElementById('rangeKm').value) || 1.0;
   const showBuildings = document.getElementById('toggleBuildings').checked;
-  const vertExag = parseFloat(document.getElementById('vertExag').value) || 2.0;
+  const vertExag   = parseFloat(document.getElementById('vertExag').value) || 2.0;
+  const photoSrc    = document.getElementById('photoSource').value;
 
   if (isNaN(lat) || isNaN(lon)) { alert('緯度経度を入力してください'); return; }
 
@@ -70,7 +71,7 @@ async function run() {
   setProgress(0.4, '航空写真取得中…');
   let photoUrl;
   try {
-    photoUrl = await fetchAerialPhoto(bb, PHOTO_ZOOM, p => setProgress(0.4 + p * 0.3, '航空写真取得中…'));
+    photoUrl = await fetchAerialPhoto(bb, PHOTO_ZOOM, p => setProgress(0.4 + p * 0.3, '航空写真取得中…'), photoSrc);
   } catch (e) {
     alert('航空写真取得失敗: ' + e.message);
     document.getElementById('runBtn').disabled = false;
