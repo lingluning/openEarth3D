@@ -213,19 +213,47 @@ async function fetchTilesetFromAPI(cityCode) {
 }
 
 // ── Building color style ───────────────────────────────────────────────────
-// Use (${height} || 0) to safely handle undefined height properties in LOD1
-function makeBuildingStyle() {
+// Apply a safe flat style first; after tileset loads we inspect real properties
+// and upgrade to height-based coloring if a height field exists.
+function flatStyle() {
+  return new Cesium.Cesium3DTileStyle({ color: "color('#d0c8bc', 0.95)" });
+}
+
+function heightStyle(propName) {
   return new Cesium.Cesium3DTileStyle({
     color: {
       conditions: [
-        ['(${height} || 0) >= 80', "color('#6aaec8', 0.95)"],
-        ['(${height} || 0) >= 50', "color('#8ab8cc', 0.95)"],
-        ['(${height} || 0) >= 30', "color('#c8a870', 0.95)"],
-        ['(${height} || 0) >= 15', "color('#c8bfb0', 0.95)"],
-        ['true',                   "color('#d0c8bc', 0.95)"],
+        [`\${${propName}} >= 80`, "color('#6aaec8', 0.95)"],
+        [`\${${propName}} >= 50`, "color('#8ab8cc', 0.95)"],
+        [`\${${propName}} >= 30`, "color('#c8a870', 0.95)"],
+        [`\${${propName}} >= 15`, "color('#c8bfb0', 0.95)"],
+        ['true',                  "color('#d0c8bc', 0.95)"],
       ]
     }
   });
+}
+
+// Known height property names used in PLATEAU 3D Tiles datasets
+const HEIGHT_PROP_CANDIDATES = [
+  'measuredHeight', '計測高さ', 'height', 'Height',
+  'buildingHeight', 'bldgHeight', 'maxHeight',
+];
+
+function applyBestStyle(tileset, statusEl) {
+  const props = tileset.properties;
+  if (props) {
+    for (const name of HEIGHT_PROP_CANDIDATES) {
+      if (Object.prototype.hasOwnProperty.call(props, name)) {
+        try {
+          tileset.style = heightStyle(name);
+          if (statusEl) statusEl.textContent += ` （高さプロパティ: ${name}）`;
+          return;
+        } catch {}
+      }
+    }
+  }
+  // Fallback: flat color (always works)
+  tileset.style = flatStyle();
 }
 
 // ── Load PLATEAU tileset ───────────────────────────────────────────────────
@@ -268,11 +296,11 @@ document.getElementById('loadBtn').addEventListener('click', async () => {
 
     const tileset = await Cesium.Cesium3DTileset.fromUrl(url, {
       shadows: Cesium.ShadowMode.ENABLED,
-      maximumScreenSpaceError: 8, // higher = more aggressive LOD
+      maximumScreenSpaceError: 8,
     });
 
-    tileset.style = makeBuildingStyle();
     currentTileset = viewer.scene.primitives.add(tileset);
+    applyBestStyle(tileset, status);
 
     // Fly to tileset with oblique angle
     const center = CITY_CENTERS[cityCode];
