@@ -130,9 +130,28 @@ async function fetchElevGrid(bb, n, onProgress) {
   return grid;
 }
 
-async function fetchAerialPhoto(bb, zoom, onProgress) {
-  const nw = deg2tile(bb.n, bb.w, zoom);
-  const se = deg2tile(bb.s, bb.e, zoom);
+// Photo tile sources
+const PHOTO_SOURCES = {
+  esri: {
+    // ESRI World Imagery: zoom up to 19-21, ~15-30cm/px in cities, no key needed
+    // NOTE: ESRI uses {z}/{y}/{x} order (y before x), unlike OSM/GSI
+    url: (z, tx, ty) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${ty}/${tx}`,
+    maxZoom: 19,
+    label: 'ESRI World Imagery (zoom 19, ~30cm/px)',
+  },
+  gsi: {
+    url: (z, tx, ty) => `https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/${z}/${tx}/${ty}.jpg`,
+    maxZoom: 18,
+    label: '国土地理院シームレス写真 (zoom 18, ~60cm/px)',
+  },
+};
+
+async function fetchAerialPhoto(bb, zoom, onProgress, source = 'esri') {
+  const src = PHOTO_SOURCES[source] || PHOTO_SOURCES.esri;
+  const effectiveZoom = Math.min(zoom, src.maxZoom);
+
+  const nw = deg2tile(bb.n, bb.w, effectiveZoom);
+  const se = deg2tile(bb.s, bb.e, effectiveZoom);
   const txMin = Math.min(nw.x, se.x), txMax = Math.max(nw.x, se.x);
   const tyMin = Math.min(nw.y, se.y), tyMax = Math.max(nw.y, se.y);
   const cols = txMax - txMin + 1, rows = tyMax - tyMin + 1, tot = cols * rows;
@@ -149,7 +168,7 @@ async function fetchAerialPhoto(bb, zoom, onProgress) {
         im.crossOrigin = 'anonymous';
         im.onload = () => res(im);
         im.onerror = () => res(null);
-        im.src = `https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/${zoom}/${tx}/${ty}.jpg`;
+        im.src = src.url(effectiveZoom, tx, ty);
       });
       if (img) try { ctx.drawImage(img, (tx - txMin) * 256, (ty - tyMin) * 256, 256, 256); } catch {}
       done++;
