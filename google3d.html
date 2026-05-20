@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Google Photorealistic 3D</title>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.114.0/Build/Cesium/Cesium.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.114.0/Build/Cesium/Widgets/widgets.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif;background:#000}
+#cesiumContainer{width:100%;height:100%}
+.cesium-widget-credits{font-size:10px!important}
+
+/* ── API Key Gate ── */
+#keyGate{
+  position:fixed;inset:0;
+  background:linear-gradient(135deg,#0a0f20 0%,#0d1b3e 100%);
+  display:flex;align-items:center;justify-content:center;z-index:2000;
+}
+#keyCard{
+  background:rgba(16,24,50,0.98);border:1px solid #0f3460;
+  border-radius:14px;padding:32px 36px;width:460px;max-width:92vw;
+  color:#e0e0f0;box-shadow:0 8px 40px rgba(0,0,0,.6);
+}
+#keyCard h2{font-size:1.3rem;color:#4fc3f7;margin-bottom:6px}
+#keyCard p{font-size:0.82rem;color:#90a8c4;line-height:1.6;margin-bottom:18px}
+#keyCard ol{font-size:0.80rem;color:#7a9ab8;line-height:2;margin-left:18px;margin-bottom:18px}
+#keyCard ol a{color:#4fc3f7;text-decoration:none}
+#keyCard ol a:hover{text-decoration:underline}
+#keyInput{
+  width:100%;padding:9px 12px;
+  background:#0a0f20;border:1px solid #0f3460;
+  color:#e0e0f0;border-radius:7px;font-size:0.88rem;
+  outline:none;margin-bottom:10px;
+  font-family:monospace;letter-spacing:.04em;
+}
+#keyInput:focus{border-color:#4fc3f7}
+#keyInput::placeholder{color:#3a5070}
+#startBtn{
+  width:100%;padding:11px;
+  background:linear-gradient(135deg,#0066cc,#4fc3f7);
+  border:none;color:#fff;font-size:1rem;font-weight:700;
+  border-radius:8px;cursor:pointer;transition:opacity .2s;
+}
+#startBtn:hover{opacity:.9}
+#keyError{font-size:0.78rem;color:#f48fb1;margin-top:8px;display:none}
+
+/* ── Main Panel ── */
+#panel{
+  position:absolute;top:14px;left:14px;
+  background:rgba(10,15,32,0.92);border:1px solid #0f3460;
+  border-radius:10px;padding:14px 16px;width:260px;
+  color:#e0e0f0;backdrop-filter:blur(10px);z-index:100;
+  display:none;
+}
+#panel h2{font-size:1rem;color:#4fc3f7;margin-bottom:10px}
+.st{font-size:0.72rem;text-transform:uppercase;letter-spacing:.06em;color:#90caf9;margin:10px 0 4px}
+select{width:100%;padding:6px 8px;background:#1a1a2e;border:1px solid #0f3460;
+  color:#e0e0f0;border-radius:5px;font-size:0.83rem;cursor:pointer;outline:none}
+select:focus{border-color:#4fc3f7}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
+input[type=text]{width:100%;padding:5px 8px;background:#1a1a2e;border:1px solid #0f3460;
+  color:#e0e0f0;border-radius:5px;font-size:0.83rem;outline:none}
+input[type=text]:focus{border-color:#4fc3f7}
+label{font-size:0.78rem;color:#7a9ab8;display:block;margin-bottom:3px}
+#flyBtn{width:100%;padding:9px;margin-top:10px;
+  background:linear-gradient(135deg,#0066cc,#4fc3f7);
+  border:none;color:#fff;font-size:0.92rem;font-weight:700;
+  border-radius:7px;cursor:pointer;transition:opacity .2s}
+#flyBtn:hover{opacity:.9}
+#flyBtn:disabled{opacity:.5;cursor:not-allowed}
+#statusBar{margin-top:8px;padding:6px 8px;background:#060c1a;
+  border-radius:5px;font-size:0.73rem;color:#81d4fa;min-height:28px;line-height:1.4}
+
+.info{margin-top:10px;padding:8px;background:#0f1a30;border-radius:6px;
+  font-size:0.70rem;color:#506070;line-height:1.5}
+.info a{color:#4fc3f7;text-decoration:none}
+
+#hint{position:absolute;bottom:14px;right:14px;
+  background:rgba(10,15,32,0.82);border:1px solid #0f3460;
+  border-radius:7px;padding:7px 12px;
+  font-size:0.72rem;color:rgba(180,210,255,.55);
+  line-height:1.7;text-align:right;z-index:100;display:none}
+#backBtn{position:absolute;bottom:14px;left:14px;
+  background:rgba(10,15,32,0.88);border:1px solid #4fc3f7;
+  color:#4fc3f7;border-radius:6px;padding:6px 14px;
+  font-size:0.8rem;cursor:pointer;z-index:100;transition:background .15s;display:none}
+#backBtn:hover{background:#4fc3f7;color:#0a0f20}
+</style>
+</head>
+<body>
+
+<!-- ── Step 1: Enter API Key ─────────────────────────────── -->
+<div id="keyGate">
+  <div id="keyCard">
+    <h2>🌍 Google Photorealistic 3D Tiles</h2>
+    <p>Google Earth と同じ写真測量ベースの 3D データを使用します。<br>
+       Google Maps Platform の API キーが必要です（無料枠あり）。</p>
+    <ol>
+      <li><a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a> を開く</li>
+      <li>プロジェクトを作成 or 選択</li>
+      <li>「APIとサービス」→「ライブラリ」→ <strong>Map Tiles API</strong> を有効化</li>
+      <li>「認証情報」→「APIキーを作成」</li>
+    </ol>
+    <input type="text" id="keyInput" placeholder="AIza...（API キーを貼り付け）" autocomplete="off"/>
+    <div id="keyError">⚠️ キーが無効です。もう一度確認してください。</div>
+    <button id="startBtn">3D ビューを開始 →</button>
+  </div>
+</div>
+
+<!-- ── Main Viewer ──────────────────────────────────────── -->
+<div id="cesiumContainer"></div>
+
+<div id="panel">
+  <h2>🌍 Google 3D Viewer</h2>
+
+  <div class="st">プリセット</div>
+  <select id="presetSelect">
+    <option value="35.6812,139.7671,600">東京駅</option>
+    <option value="35.6586,139.7454,500">東京タワー</option>
+    <option value="35.6938,139.7034,700">新宿高層ビル街</option>
+    <option value="35.6585,139.7013,400">渋谷スクランブル交差点</option>
+    <option value="34.6937,135.5023,600">大阪駅</option>
+    <option value="34.6873,135.5262,500">大阪城</option>
+    <option value="35.0116,135.7681,500">京都駅</option>
+    <option value="35.3607,138.7274,3000">富士山</option>
+    <option value="43.0686,141.3507,700">札幌時計台</option>
+    <option value="35.7101,139.8107,500">スカイツリー</option>
+    <option value="48.8584,2.2945,400">エッフェル塔</option>
+    <option value="40.7484,-73.9967,500">エンパイアステートビル</option>
+    <option value="51.5007,-0.1246,400">ビッグベン</option>
+    <option value="custom">カスタム座標…</option>
+  </select>
+
+  <div id="customRow" class="row2" style="display:none;margin-top:6px">
+    <div><label>緯度</label><input type="text" id="latIn" placeholder="35.681"/></div>
+    <div><label>経度</label><input type="text" id="lonIn" placeholder="139.767"/></div>
+  </div>
+
+  <button id="flyBtn">✈️ この場所へ移動</button>
+  <div id="statusBar">読み込み中…</div>
+
+  <div class="info">
+    データ: © Google &nbsp;|&nbsp; <a href="https://mapsplatform.google.com/" target="_blank">Google Maps Platform</a><br>
+    利用規約: 非商用・個人利用のみ
+  </div>
+</div>
+
+<div id="hint">
+  左ドラッグ: 視点回転<br>
+  右ドラッグ: 移動<br>
+  スクロール: ズーム<br>
+  中クリック: チルト
+</div>
+<button id="backBtn" onclick="location.href='index.html'">← openEarth3D</button>
+
+<script>
+let viewer, googleTileset, apiKey;
+
+// ── API Key gate ───────────────────────────────────────────────────────────
+const savedKey = localStorage.getItem('google3d_apikey') || '';
+if (savedKey) document.getElementById('keyInput').value = savedKey;
+
+document.getElementById('startBtn').addEventListener('click', () => {
+  const key = document.getElementById('keyInput').value.trim();
+  if (!key || !key.startsWith('AIza')) {
+    document.getElementById('keyError').style.display = 'block';
+    return;
+  }
+  document.getElementById('keyError').style.display = 'none';
+  apiKey = key;
+  localStorage.setItem('google3d_apikey', key);
+  document.getElementById('keyGate').style.display = 'none';
+  initViewer();
+});
+
+// ── Initialize Cesium ──────────────────────────────────────────────────────
+function initViewer() {
+  viewer = new Cesium.Viewer('cesiumContainer', {
+    // Google Photorealistic Tiles include terrain + imagery — no separate providers needed
+    imageryProvider: false,
+    terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+    baseLayerPicker: false,
+    geocoder: false,
+    homeButton: false,
+    sceneModePicker: false,
+    navigationHelpButton: false,
+    animation: false,
+    timeline: false,
+    fullscreenButton: false,
+    infoBox: false,
+    selectionIndicator: false,
+    shadows: false,
+    contextOptions: { requestWebgl2: true },
+  });
+
+  // Hide Cesium globe — Google tiles provide their own terrain mesh
+  viewer.scene.globe.show = false;
+  viewer.scene.skyAtmosphere.show = true;
+  viewer.scene.fog.enabled = false;
+
+  loadGoogleTiles();
+}
+
+// ── Load Google Photorealistic 3D Tiles ───────────────────────────────────
+async function loadGoogleTiles() {
+  const status = document.getElementById('statusBar');
+  status.textContent = 'Google 3D タイルを読み込み中…';
+
+  try {
+    googleTileset = await Cesium.Cesium3DTileset.fromUrl(
+      `https://tile.googleapis.com/v1/3dtiles/root.json?key=${apiKey}`,
+      {
+        showCreditsOnScreen: true, // required by Google ToS
+      }
+    );
+    viewer.scene.primitives.add(googleTileset);
+
+    // Show UI
+    document.getElementById('panel').style.display = 'block';
+    document.getElementById('hint').style.display = 'block';
+    document.getElementById('backBtn').style.display = 'block';
+
+    // Fly to Tokyo Station as default
+    flyTo(35.6812, 139.7671, 600);
+    status.textContent = '✅ 読み込み完了 — Google Earth と同じデータです';
+  } catch (e) {
+    document.getElementById('keyGate').style.display = 'flex';
+    document.getElementById('keyError').style.display = 'block';
+    document.getElementById('keyError').textContent =
+      '❌ タイル読み込み失敗。APIキーか Map Tiles API の有効化を確認してください: ' + e.message;
+    console.error(e);
+  }
+}
+
+// ── Camera fly-to ──────────────────────────────────────────────────────────
+function flyTo(lat, lon, alt) {
+  viewer.camera.flyTo({
+    destination: Cesium.Cartesian3.fromDegrees(lon, lat, alt),
+    orientation: {
+      heading: Cesium.Math.toRadians(-20),
+      pitch:   Cesium.Math.toRadians(-35),
+      roll:    0,
+    },
+    duration: 2.0,
+  });
+}
+
+// ── UI events ─────────────────────────────────────────────────────────────
+document.getElementById('presetSelect').addEventListener('change', function () {
+  const customRow = document.getElementById('customRow');
+  customRow.style.display = this.value === 'custom' ? 'grid' : 'none';
+});
+
+document.getElementById('flyBtn').addEventListener('click', () => {
+  const sel = document.getElementById('presetSelect').value;
+  if (sel === 'custom') {
+    const lat = parseFloat(document.getElementById('latIn').value);
+    const lon = parseFloat(document.getElementById('lonIn').value);
+    if (isNaN(lat) || isNaN(lon)) { alert('緯度経度を入力してください'); return; }
+    flyTo(lat, lon, 500);
+  } else {
+    const [lat, lon, alt] = sel.split(',').map(Number);
+    flyTo(lat, lon, alt);
+  }
+});
+
+// Enter key in API key input
+document.getElementById('keyInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('startBtn').click();
+});
+</script>
+</body>
+</html>
