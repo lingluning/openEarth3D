@@ -21,6 +21,7 @@ function deg2tileFrac(lat, lon, z) {
 }
 
 // Decode a GSI DEM PNG tile → Float32Array(256*256) of elevations in metres
+// Returns null on 404 (sea area or outside Japan) — caller should fallback
 async function fetchDemTile(z, tx, ty) {
   return new Promise(resolve => {
     const img = new Image();
@@ -35,14 +36,36 @@ async function fetchDemTile(z, tx, ty) {
       for (let i = 0; i < 256 * 256; i++) {
         const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
         const v = r * 65536 + g * 256 + b;
-        // 8388608 (0x800000) = no-data sentinel
         arr[i] = v === 8388608 ? 0 : v < 8388608 ? v * 0.01 : (v - 16777216) * 0.01;
       }
       resolve(arr);
     };
-    img.onerror = () => resolve(null);
-    // dem5a_png: ~5m DEM, zoom 9-15 (Japan only)
+    img.onerror = () => resolve(null); // 404 → null, no crash
     img.src = `https://cyberjapandata.gsi.go.jp/xyz/dem5a_png/${z}/${tx}/${ty}.png`;
+  });
+}
+
+// AWS Terrarium global DEM (ex-Mapzen, free, no key, full global coverage)
+// Encoding: elevation = R*256 + G + B/256 - 32768
+async function fetchTerrariumTile(z, tx, ty) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 256;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const px = ctx.getImageData(0, 0, 256, 256).data;
+      const arr = new Float32Array(256 * 256);
+      for (let i = 0; i < 256 * 256; i++) {
+        const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+        arr[i] = r * 256 + g + b / 256 - 32768;
+      }
+      resolve(arr);
+    };
+    img.onerror = () => resolve(null);
+    img.src = `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`;
   });
 }
 
@@ -58,8 +81,18 @@ function sampleTile(arr, fx, fy) {
        + (arr[y1 * 256 + x0] * (1 - tx) + arr[y1 * 256 + x1] * tx) * ty;
 }
 
-// High-resolution terrain from GSI DEM PNG tiles (~10m at z=14, Japan coverage)
-// Returns null if outside Japan (all tiles 404)
+// Terrain tile with cascade: GSI dem5a (Japan ~5m) → AWS Terrarium (global ~30m)
+// GSI 404 (sea/outside Japan) is silently handled — no console errors for missing tiles
+async function fetchDemTileCascade(z, tx, ty) {
+  const gsi = await fetchDemTile(z, tx, ty);
+  if (gsi) return gsi;
+  // GSI returned null (404 or outside coverage) → fall back to global Terrarium
+  return await fetchTerrariumTile(z, tx, ty);
+}
+
+// High-resolution terrain grid
+//   Japan:        GSI dem5a ~5m resolution
+//   Outside Japan: AWS Terrarium ~30m resolution (global, no 404 errors)
 async function fetchElevGridHiRes(bb, meshN, onProgress) {
   const z = 14;
   const nwF = deg2tileFrac(bb.n, bb.w, z);
@@ -73,12 +106,10 @@ async function fetchElevGridHiRes(bb, meshN, onProgress) {
 
   for (let ty = tyMin; ty <= tyMax; ty++) {
     for (let tx = txMin; tx <= txMax; tx++) {
-      tileMap[`${tx}_${ty}`] = await fetchDemTile(z, tx, ty);
+      tileMap[`${tx}_${ty}`] = await fetchDemTileCascade(z, tx, ty);
       onProgress && onProgress(++done / total * 0.85);
     }
   }
-
-  if (!Object.values(tileMap).some(Boolean)) return null; // outside Japan
 
   const grid = [];
   for (let r = 0; r < meshN; r++) {
@@ -93,7 +124,7 @@ async function fetchElevGridHiRes(bb, meshN, onProgress) {
     grid.push(row);
     onProgress && onProgress(0.85 + r / meshN * 0.15);
   }
-  return grid;
+  return grid; // always returns data now (never null)
 }
 
 // Fallback: individual-point API (works globally, slower, lower resolution)
