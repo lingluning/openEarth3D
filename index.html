@@ -134,6 +134,7 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
     </div>
 
     <button id="runBtn">🌍 3D表示を生成</button>
+    <button id="exportBtn" disabled style="width:100%;padding:8px;margin-top:6px;background:#0f3460;border:1px solid #4fc3f7;color:#4fc3f7;border-radius:6px;font-size:0.85rem;font-weight:600;cursor:pointer;opacity:.5">⬇️ 3DモデルをDAEで保存（SketchUp対応）</button>
 
     <div class="card">
       <h3>建物の凡例</h3>
@@ -180,12 +181,16 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 <!-- Three.js r0.128.0 UMD (works with file:// and https://) -->
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/ColladaExporter.js"></script>
 <!-- Leaflet -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- JSZip for DAE+texture bundling -->
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
 <script src="js/coords.js"></script>
 <script src="js/terrain.js"></script>
 <script src="js/buildings.js"></script>
+<script src="js/export.js"></script>
 <script src="js/scene.js"></script>
 <script src="js/app.js"></script>
 </body>

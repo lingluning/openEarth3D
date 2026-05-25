@@ -5,6 +5,7 @@ const GRID_N     = 128;
 const PHOTO_ZOOM = 19; // ESRI supports zoom 19 (~30cm/px); GSI caps at 18 (~60cm/px)
 
 let leafletMap, leafletMarker;
+let currentTerrain = null, currentBuildings = null;
 
 function initMap() {
   leafletMap = L.map('minimap').setView([35.6812, 139.7671], 13);
@@ -78,8 +79,10 @@ async function run() {
   // ── Step 3: build 3D scene ─────────────────────────────────────────────
   setProgress(0.7, '3Dシーン構築中…');
   clearSceneObjects();
-  scene.add(buildTerrain(elevGrid, meshN, xSize, zSize, photoUrl, vertExag));
+  currentTerrain = buildTerrain(elevGrid, meshN, xSize, zSize, photoUrl, vertExag);
+  scene.add(currentTerrain);
   placeCameraOverTerrain(elevGrid, meshN, xSize, zSize, vertExag);
+  currentBuildings = null;
 
   // ── Step 4: buildings ──────────────────────────────────────────────────
   if (showBuildings) {
@@ -88,7 +91,8 @@ async function run() {
       const elements = await fetchBuildings(bb);
       setProgress(0.88, '建物3D生成中…');
       const parsed = parseBuildings(elements, bb);
-      scene.add(createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag));
+      currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag);
+      scene.add(currentBuildings);
       setProgress(0.96, `建物 ${parsed.length} 棟を生成`);
     } catch (e) {
       console.warn('建物取得失敗:', e);
@@ -98,6 +102,9 @@ async function run() {
   setProgress(1.0, '完了');
   setTimeout(() => showProgress(false), 1000);
   document.getElementById('runBtn').disabled = false;
+  const exportBtn = document.getElementById('exportBtn');
+  exportBtn.disabled = false;
+  exportBtn.style.opacity = '1';
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -105,6 +112,25 @@ document.addEventListener('DOMContentLoaded', () => {
   initMap();
 
   document.getElementById('runBtn').addEventListener('click', run);
+
+  document.getElementById('exportBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('exportBtn');
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '📦 ZIPを生成中…';
+    try {
+      const lat = parseFloat(document.getElementById('latInput').value);
+      const lon = parseFloat(document.getElementById('lonInput').value);
+      const name = `openEarth3D_${lat.toFixed(4)}_${lon.toFixed(4)}`;
+      await exportSceneAsDae(currentTerrain, currentBuildings, name);
+    } catch (e) {
+      alert('エクスポート失敗: ' + e.message);
+      console.error(e);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  });
 
   document.getElementById('locBtn').addEventListener('click', () => {
     if (!navigator.geolocation) { alert('Geolocation not supported'); return; }

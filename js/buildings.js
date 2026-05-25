@@ -112,6 +112,7 @@ function makeFacadeTexture(wallHex, type) {
 
   const tex = new THREE.CanvasTexture(cvs);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.name = 'facade_' + key;
   _facadeCache[key] = tex;
   return tex;
 }

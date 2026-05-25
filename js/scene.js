@@ -91,7 +91,9 @@ function buildTerrain(grid, n, xSize, zSize, texDataUrl, vertExag) {
 
   const tex = new THREE.TextureLoader().load(texDataUrl);
   tex.encoding = THREE.sRGBEncoding;
+  tex.name = 'aerial';
   const mat = new THREE.MeshLambertMaterial({ map: tex });
+  mat.name = 'terrain';
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.position.set(xSize / 2, 0, zSize / 2);
