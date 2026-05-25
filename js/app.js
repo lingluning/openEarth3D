@@ -48,16 +48,12 @@ async function run() {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
 
   // ── Step 1: terrain elevation ──────────────────────────────────────────
-  setProgress(0, '地形データ取得中（高精度DEM）…');
+  // fetchElevGridHiRes now works globally:
+  //   Japan → GSI dem5a (~5m), elsewhere → AWS Terrarium (~30m), no more 404 crashes
+  setProgress(0, '地形データ取得中…');
   let elevGrid;
   try {
-    // Try high-res DEM PNG tiles first (Japan only)
-    elevGrid = await fetchElevGridHiRes(bb, GRID_N, p => setProgress(p * 0.4, '地形データ取得中（高精度DEM）…'));
-    if (!elevGrid) {
-      // Outside Japan: fallback to individual API with reduced grid
-      setProgress(0, '地形データ取得中（グローバル）…');
-      elevGrid = await fetchElevGrid(bb, 48, p => setProgress(p * 0.4, '地形データ取得中（グローバル）…'));
-    }
+    elevGrid = await fetchElevGridHiRes(bb, GRID_N, p => setProgress(p * 0.4, '地形データ取得中…'));
   } catch (e) {
     alert('地形データ取得失敗: ' + e.message);
     document.getElementById('runBtn').disabled = false;
@@ -65,7 +61,7 @@ async function run() {
     return;
   }
 
-  const meshN = elevGrid.length; // may differ from GRID_N if fallback was used
+  const meshN = elevGrid.length;
 
   // ── Step 2: aerial photo ───────────────────────────────────────────────
   setProgress(0.4, '航空写真取得中…');
