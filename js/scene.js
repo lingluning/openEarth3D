@@ -2,6 +2,7 @@
 
 let renderer, scene, camera, controls, animId;
 let sky, sun, hemiLight, fillLight, composer;
+let pmrem, skyOnlyScene;
 let _currentHour = 13.5; // local solar hour; updated by setTimeOfDay()
 
 function initScene(canvas) {
@@ -56,7 +57,16 @@ function initScene(canvas) {
   fillLight.position.set(-400, 300, -200);
   scene.add(fillLight);
 
-  setTimeOfDay(_currentHour); // initialise sun + sky tint
+  // Sky-only scene used by PMREMGenerator to bake an environment map. The
+  // clone shares the original sky's material (uniforms included), so updating
+  // the sun position automatically propagates here too — we just need to
+  // re-bake on each time-of-day change.
+  pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+  skyOnlyScene = new THREE.Scene();
+  skyOnlyScene.add(new THREE.Mesh(sky.geometry, sky.material));
+
+  setTimeOfDay(_currentHour); // initialise sun + sky tint + env map
 
   // Post-processing: render-pass + bloom for highlights + SSAO for crevices.
   // Effects are wired in initComposer() lazily once we know the canvas size.
@@ -133,6 +143,13 @@ function setTimeOfDay(hour) {
   const fogB = Math.max(0.08, 0.45 + 0.45 * Math.max(0, elev));
   scene.fog.color.setRGB(fogR, fogG, fogB);
   renderer.setClearColor(scene.fog.color);
+
+  // Re-bake the PBR environment map. Cheap (sky only, no terrain/buildings
+  // captured) — only called when the user moves the time slider.
+  if (pmrem && skyOnlyScene) {
+    if (scene.environment) scene.environment.dispose();
+    scene.environment = pmrem.fromScene(skyOnlyScene, 0).texture;
+  }
 }
 
 function onResize() {

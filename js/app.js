@@ -155,18 +155,36 @@ async function run() {
   placeCameraOverTerrain(elevGrid, meshN, xSize, zSize, vertExag);
   currentBuildings = null;
 
-  // ── Step 4: buildings ──────────────────────────────────────────────────
+  // ── Step 4: buildings + ground features ────────────────────────────────
+  // Both OSM queries run in parallel; the roads/water/trees layer is light
+  // enough that it almost always finishes before the buildings.
   if (showBuildings) {
-    setProgress(0.75, '建物データ取得中（OSM）…');
+    setProgress(0.75, 'OSMデータ取得中（建物・道路・水域）…');
     try {
-      const elements = await fetchBuildings(bb);
+      const [bElems, gElems] = await Promise.all([
+        fetchBuildings(bb),
+        fetchGroundFeatures(bb).catch(() => []),
+      ]);
+
+      // Ground features first so buildings draw on top (they're taller and
+      // shouldn't be blocked by water transparency).
+      const feats = parseGroundFeatures(gElems, bb);
+      const featGroup = new THREE.Group();
+      featGroup.name = 'ground-features';
+      featGroup.add(createWater(feats.waters, bb, elevGrid, meshN, vertExag));
+      featGroup.add(createRoads(feats.roads, bb, elevGrid, meshN, vertExag));
+      featGroup.add(createTrees(feats.trees, feats.forests, bb, elevGrid, meshN, vertExag));
+      scene.add(featGroup);
+
       setProgress(0.88, '建物3D生成中…');
-      const parsed = parseBuildings(elements, bb);
+      const parsed = parseBuildings(bElems, bb);
       currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag);
       scene.add(currentBuildings);
-      setProgress(0.96, `建物 ${parsed.length} 棟を生成`);
+      setProgress(0.96,
+        `建物 ${parsed.length} 棟・道路 ${feats.roads.length}・水域 ${feats.waters.length}・樹木 ${feats.trees.length} を生成`
+      );
     } catch (e) {
-      console.warn('建物取得失敗:', e);
+      console.warn('OSM取得失敗:', e);
     }
   }
 
