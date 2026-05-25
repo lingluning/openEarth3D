@@ -22,49 +22,45 @@ out body;>;out skel qt;`;
 // if we trusted the tag literally every roof would default to flat and the
 // city would look like a parking lot of grey boxes. Infer a plausible
 // shape from the building type, footprint area, and height instead.
+//
+// Heuristic: small / mid-sized civilian buildings get pitched roofs;
+// industrial, commercial and anything tall stays flat.
 function _inferRoofShape(tags, areaM2, height) {
   if (tags['roof:shape']) return tags['roof:shape'].toLowerCase();
 
   const t = (tags.building || '').toLowerCase();
 
   // Religious / heritage architecture almost always has a sloped roof.
-  if (['church','cathedral','chapel'].includes(t))       return 'pyramidal';
-  if (['temple','shrine','pagoda'].includes(t))          return 'pyramidal';
-  if (t === 'mosque')                                    return 'dome';
-  if (t === 'castle' || t === 'tower')                   return 'pyramidal';
+  if (['church','cathedral','chapel','basilica'].includes(t)) return 'pyramidal';
+  if (['temple','shrine','pagoda'].includes(t))               return 'pyramidal';
+  if (t === 'mosque')                                         return 'dome';
+  if (t === 'castle' || t === 'tower')                        return 'pyramidal';
 
-  // Small detached houses → gabled roof. Cap by footprint + height so a
-  // 200 m tall "house" tag doesn't get a pitched roof.
-  if (areaM2 < 250 && height < 14 &&
-      ['house','detached','residential','bungalow','cabin',
-       'cottage','semidetached_house','farm'].includes(t)) {
-    return 'gabled';
+  // Industrial / large commercial / hi-rise stay flat regardless of size.
+  if (['industrial','warehouse','factory','manufacture','depot',
+       'parking','silo','storage_tank','garage','garages'].includes(t)) return 'flat';
+  if (height >= 25 || areaM2 >= 1500) return 'flat';
+
+  // Mid-sized commercial / office: small ones get a hipped cap, big ones flat.
+  if (['retail','supermarket','commercial','office','hotel',
+       'hospital','clinic','train_station'].includes(t)) {
+    return areaM2 < 600 && height < 15 ? 'hipped' : 'flat';
   }
 
-  // Barns and small farm buildings → hipped.
-  if (areaM2 < 600 && height < 12 &&
-      ['barn','farm_auxiliary','stable','greenhouse','hut','shed'].includes(t)) {
-    return 'hipped';
-  }
-
-  // Schools, town halls, civic buildings → hipped if not too big.
-  if (areaM2 < 1500 && height < 18 &&
-      ['school','kindergarten','civic','public','townhall'].includes(t)) {
-    return 'hipped';
-  }
-
-  // Default — apartments, offices, retail, industrial, anything large.
+  // Everything else (incl. `building=yes`, `apartments`, `house`, …)
+  // — pick the shape from size. Small → gabled, mid → hipped.
+  if (areaM2 < 400 && height < 14) return 'gabled';
+  if (areaM2 < 900 && height < 20) return 'hipped';
   return 'flat';
 }
 
 function _inferRoofHeight(shape, totalH, areaM2) {
   if (shape === 'flat') return 0;
   if (shape === 'dome' || shape === 'onion') {
-    // Bigger domes need more rise to look like a dome and not a contact lens.
     return Math.min(Math.max(3, Math.sqrt(areaM2) * 0.25), totalH * 0.6);
   }
-  // Gabled / hipped / pyramidal: 25–40 % of total height, clamped 2..8 m.
-  return Math.min(8, Math.max(2, totalH * 0.32));
+  // Gabled / hipped / pyramidal: ~33 % of total height, clamped 2.5..7 m.
+  return Math.min(7, Math.max(2.5, totalH * 0.33));
 }
 
 // Polygon area in m² using the shoelace formula in local-XZ space.
@@ -194,11 +190,114 @@ function getBuildingStyle(tags) {
   return { wall: 0xc8c0b4, roof: 0x585048, type: 'concrete', pbr: { rough: 0.85, metal: 0.0 } };
 }
 
+// ── Procedural roof textures ──────────────────────────────────────────────
+// Two patterns:
+//   pitched → overlapping clay-tile rows (gabled/hipped/pyramidal houses)
+//   flat    → asphalt / gravel membrane with seams
+// One texture covers a 4 m × 4 m patch of roof, so a typical 12 m house
+// roof sees ~3 repeats and individual tiles read at ~30 cm — the natural
+// size in real life.
+const _roofTexCache = {};
+function makeRoofTexture(baseHex, pitched) {
+  const key = `${baseHex}_${pitched ? 'tile' : 'flat'}`;
+  if (_roofTexCache[key]) return _roofTexCache[key];
+
+  const W = 256, H = 256;
+  const cvs = document.createElement('canvas');
+  cvs.width = W; cvs.height = H;
+  const ctx = cvs.getContext('2d');
+
+  const br = (baseHex >> 16) & 0xff;
+  const bg = (baseHex >> 8) & 0xff;
+  const bb = baseHex & 0xff;
+  const baseRGB = (k=1) => `rgb(${(br*k)|0},${(bg*k)|0},${(bb*k)|0})`;
+
+  if (pitched) {
+    // Mortar / shadow background a bit darker than the base.
+    ctx.fillStyle = baseRGB(0.55);
+    ctx.fillRect(0, 0, W, H);
+
+    // Overlapping rows of curved clay tiles. Rows offset every other row.
+    const tileW = 24, tileH = 16;
+    for (let row = -1; row * tileH < H; row++) {
+      const y = row * tileH;
+      const offX = (row & 1) ? tileW / 2 : 0;
+      for (let col = -1; col * tileW + offX < W; col++) {
+        const x = col * tileW + offX;
+        const v = 0.75 + Math.random() * 0.4;
+        // Tile body: rounded "shield" top + rectangle base.
+        ctx.fillStyle = baseRGB(v);
+        ctx.beginPath();
+        ctx.moveTo(x, y + tileH);
+        ctx.lineTo(x, y + tileH * 0.55);
+        ctx.arc(x + tileW * 0.5, y + tileH * 0.55, tileW * 0.5, Math.PI, 0, false);
+        ctx.lineTo(x + tileW, y + tileH);
+        ctx.closePath();
+        ctx.fill();
+        // Top highlight.
+        ctx.strokeStyle = `rgba(255,255,255,${0.10 + Math.random() * 0.08})`;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(x + tileW * 0.5, y + tileH * 0.55, tileW * 0.5 - 0.8, Math.PI, 0, false);
+        ctx.stroke();
+        // Bottom shadow line — separates rows.
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        ctx.beginPath();
+        ctx.moveTo(x - 0.5, y + tileH);
+        ctx.lineTo(x + tileW + 0.5, y + tileH);
+        ctx.stroke();
+      }
+    }
+  } else {
+    // Asphalt-membrane base + noise + faint seams every 1 m (= 64 px).
+    ctx.fillStyle = baseRGB(0.85);
+    ctx.fillRect(0, 0, W, H);
+    const img = ctx.getImageData(0, 0, W, H);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const n = (Math.random() - 0.5) * 28;
+      img.data[i]   = Math.max(0, Math.min(255, img.data[i]   + n));
+      img.data[i+1] = Math.max(0, Math.min(255, img.data[i+1] + n));
+      img.data[i+2] = Math.max(0, Math.min(255, img.data[i+2] + n));
+    }
+    ctx.putImageData(img, 0, 0);
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 1;
+    for (let s = 0; s < W; s += 64) {
+      ctx.beginPath(); ctx.moveTo(s, 0); ctx.lineTo(s, H); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, s); ctx.lineTo(W, s); ctx.stroke();
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(cvs);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.encoding = THREE.sRGBEncoding;
+  tex.name = `roof_${key}`;
+  _roofTexCache[key] = tex;
+  return tex;
+}
+
+// Project geometry vertices to world-XZ planar UVs so a single tile
+// texture maps onto any roof shape — pyramidal, hipped, gabled, flat —
+// without per-face UV unwrapping. UV_SCALE controls the world distance
+// covered by one texture tile.
+const ROOF_UV_SCALE = 4;
+function _addRoofUVs(geo) {
+  const pos = geo.attributes.position;
+  const uvs = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uvs[i*2]   = pos.getX(i) / ROOF_UV_SCALE;
+    uvs[i*2+1] = pos.getZ(i) / ROOF_UV_SCALE;
+  }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  return geo;
+}
+
 // ── Material cache (shared across buildings of the same style) ─────────────
 let _matCache = { wall: {}, roof: {} };
 function resetBuildingCaches() {
   _matCache = { wall: {}, roof: {} };
   for (const k in _facadeCache) delete _facadeCache[k];
+  for (const k in _roofTexCache) delete _roofTexCache[k];
 }
 
 function _getWallMat(style) {
@@ -215,13 +314,14 @@ function _getWallMat(style) {
   _matCache.wall[key] = mat;
   return mat;
 }
-function _getRoofMat(style) {
-  const key = `${style.roof}_${style.type}`;
+function _getRoofMat(style, pitched) {
+  const key = `${style.roof}_${style.type}_${pitched ? 'p' : 'f'}`;
   if (_matCache.roof[key]) return _matCache.roof[key];
   const mat = new THREE.MeshStandardMaterial({
-    color:     style.roof,
-    roughness: 0.75,
-    metalness: style.type === 'glass' ? 0.3 : 0.0,
+    map:       makeRoofTexture(style.roof, pitched),
+    color:     0xffffff,         // let the texture provide the colour
+    roughness: pitched ? 0.82 : 0.88,
+    metalness: 0.0,
     // Flat roofs come from THREE.ShapeGeometry whose winding is arbitrary
     // depending on Earcut output; DoubleSide guarantees visibility.
     side: THREE.DoubleSide,
@@ -272,7 +372,7 @@ function _makeFlatRoofGeo(footprint, y) {
   const geo = new THREE.ShapeGeometry(shape);
   geo.rotateX(-Math.PI / 2);
   geo.translate(0, y, 0);
-  return geo;
+  return _addRoofUVs(geo);
 }
 
 function _makePyramidalRoofGeo(footprint, baseY, topY) {
@@ -289,7 +389,7 @@ function _makePyramidalRoofGeo(footprint, baseY, topY) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.computeVertexNormals();
-  return geo;
+  return _addRoofUVs(geo);
 }
 
 function _makeDomeRoofGeo(footprint, baseY, topY) {
@@ -304,7 +404,9 @@ function _makeDomeRoofGeo(footprint, baseY, topY) {
   // Squash vertically to match roof height instead of r
   sphere.scale(1, h / r, 1);
   sphere.translate(cx, baseY, cz);
-  return sphere;
+  // SphereGeometry has spherical UVs already; replace with planar so the
+  // tile texture aligns with the other roof shapes.
+  return _addRoofUVs(sphere);
 }
 
 function _makeGabledRoofGeo(footprint, baseY, topY) {
@@ -354,7 +456,7 @@ function _makeGabledRoofGeo(footprint, baseY, topY) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.computeVertexNormals();
-  return geo;
+  return _addRoofUVs(geo);
 }
 
 function _makeRoofGeo(shape, footprint, baseY, topY) {
@@ -408,9 +510,11 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   wallMesh.castShadow = true;
   wallMesh.receiveShadow = true;
 
-  // Roof: matches the OSM roof:shape tag.
+  // Roof: matches the OSM roof:shape tag (or our inference if absent).
+  // Pitched roofs get a clay-tile texture; flat roofs an asphalt membrane.
+  const pitched = building.roofShape !== 'flat' && roofH > 0.5;
   const roofGeo = _makeRoofGeo(building.roofShape, pts2d, wallTop, roofTop);
-  const roofMesh = new THREE.Mesh(roofGeo, _getRoofMat(style));
+  const roofMesh = new THREE.Mesh(roofGeo, _getRoofMat(style, pitched));
   roofMesh.castShadow = true;
   roofMesh.receiveShadow = true;
 
