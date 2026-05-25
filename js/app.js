@@ -177,6 +177,7 @@ async function run() {
       featGroup.name = 'ground-features';
       featGroup.add(createWater(feats.waters, bb, elevGrid, meshN, vertExag));
       featGroup.add(createRoads(feats.roads, bb, elevGrid, meshN, vertExag));
+      featGroup.add(createBridges(feats.bridges, bb, elevGrid, meshN, vertExag));
       featGroup.add(createTrees(feats.trees, feats.forests, bb, elevGrid, meshN, vertExag));
       scene.add(featGroup);
 
@@ -188,7 +189,7 @@ async function run() {
       const failNote = (bRes.status === 'rejected' || gRes.status === 'rejected')
         ? ' ⚠️ 一部のOSMデータ取得失敗' : '';
       setProgress(0.96,
-        `建物 ${parsed.length} 棟・道路 ${feats.roads.length}・水域 ${feats.waters.length}・樹木 ${feats.trees.length} を生成${failNote}`
+        `建物 ${parsed.length} 棟・道路 ${feats.roads.length}・橋 ${feats.bridges.length}・水域 ${feats.waters.length}・樹木 ${feats.trees.length} を生成${failNote}`
       );
     } catch (e) {
       console.warn('OSMジオメトリ生成失敗:', e);

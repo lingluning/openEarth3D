@@ -61,7 +61,7 @@ function parseGroundFeatures(elements, bb) {
   const nodeMap = {};
   elements.filter(e => e.type === 'node').forEach(n => { nodeMap[n.id] = n; });
 
-  const roads = [], waters = [], forests = [], trees = [];
+  const roads = [], waters = [], forests = [], trees = [], bridges = [];
 
   for (const e of elements) {
     if (e.type === 'way' && e.tags) {
@@ -74,7 +74,23 @@ function parseGroundFeatures(elements, bb) {
 
       if (t.highway) {
         const style = ROAD_STYLES[t.highway] || ROAD_STYLES.unclassified;
-        roads.push({ coords, ...style });
+        // OSM tags bridges with `bridge=*` on the underlying highway way.
+        // `bridge=no` means "explicitly not a bridge" (rare), everything
+        // else (yes/viaduct/cantilever/suspension/…) counts.
+        const isBridge = t.bridge && t.bridge !== 'no';
+        if (isBridge) {
+          const layer = parseInt(t.layer, 10);
+          bridges.push({
+            coords,
+            width: style.w,
+            // Use OSM `layer` (typical bridges have layer=1..3) to space
+            // stacked structures; fall back to 1 for un-tagged bridges.
+            layer: Number.isFinite(layer) && layer > 0 ? layer : 1,
+            kind: t.bridge,
+          });
+        } else {
+          roads.push({ coords, ...style });
+        }
       } else if (t.natural === 'water' || t.water || t.waterway === 'riverbank') {
         if (coords.length >= 3) waters.push({ coords });
       } else if (coords.length >= 3) {
@@ -92,7 +108,7 @@ function parseGroundFeatures(elements, bb) {
       trees.push({ lat: e.lat, lon: e.lon });
     }
   }
-  return { roads, waters, forests, trees };
+  return { roads, waters, forests, trees, bridges };
 }
 
 // ── Road geometry — flat ribbons hovering 0.5 m above the terrain ─────────
@@ -190,6 +206,154 @@ function createRoads(roads, bb, elevGrid, gridN, vertExag) {
     mesh.receiveShadow = true;
     group.add(mesh);
   }
+  return group;
+}
+
+// ── Bridges — elevated road deck + thickness + parapets ──────────────────
+// OSM marks bridges with `bridge=*` on the underlying highway way; we
+// pull those out in parseGroundFeatures and render them separately so the
+// deck sits above the terrain (and above water) rather than draped on it.
+//
+// The geometry is layered:
+//   • deck  : a solid slab ~0.5 m thick along the ribbon path, top
+//             surface at  baseY + lift, bottom at top - thickness.
+//   • parapet: a thin vertical wall on each side of the deck, rising
+//             ~1 m above the deck so the side rail reads from far away.
+//
+// All three meshes per bridge share one Group; we merge into the parent
+// `bridges` group at the end so the whole layer is a handful of draw
+// calls regardless of how many bridges OSM returned.
+function createBridges(bridges, bb, elevGrid, gridN, vertExag) {
+  const group = new THREE.Group();
+  group.name = 'bridges';
+  if (!bridges || bridges.length === 0) return group;
+
+  const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
+  // OSM `layer` spacing — typical road bridges sit ~5 m above the deck
+  // they cross, viaducts higher. Tuned by eye, not by physics.
+  const LIFT_PER_LAYER = 5;
+  const DECK_THICKNESS = 0.6;
+  const PARAPET_H      = 1.1;
+  const PARAPET_T      = 0.25;
+
+  function terrainY(x, z) {
+    const rx = Math.max(0, Math.min(1, x / xSize));
+    const rz = Math.max(0, Math.min(1, z / zSize));
+    return getElevAt(elevGrid, gridN, rx, rz) * vertExag;
+  }
+
+  const deckPositions = [], parapetPositions = [];
+
+  for (const br of bridges) {
+    const pts = br.coords.map(c => _toLocal(c, bb));
+    const n = pts.length;
+    if (n < 2) continue;
+
+    // Bridge deck stays at a constant lift above the average ground
+    // elevation along the bridge — gives a flat deck instead of a deck
+    // that follows terrain dips under it.
+    let avg = 0;
+    for (const p of pts) avg += terrainY(p.x, p.z);
+    avg /= n;
+    const deckTopY = avg + LIFT_PER_LAYER * br.layer;
+    const deckBotY = deckTopY - DECK_THICKNESS;
+
+    // Outward normals at each vertex (averaged with neighbour).
+    const normals = new Array(n);
+    for (let i = 0; i < n; i++) {
+      let dx = 0, dz = 0;
+      if (i > 0)     { dx += pts[i].x - pts[i-1].x; dz += pts[i].z - pts[i-1].z; }
+      if (i < n - 1) { dx += pts[i+1].x - pts[i].x; dz += pts[i+1].z - pts[i].z; }
+      const L = Math.hypot(dx, dz) || 1;
+      normals[i] = { x: -dz / L, z: dx / L };
+    }
+    const half = br.width / 2;
+
+    for (let i = 0; i < n - 1; i++) {
+      const a = pts[i],     na = normals[i];
+      const b = pts[i + 1], nb = normals[i + 1];
+      const al = { x: a.x + na.x * half, z: a.z + na.z * half };
+      const ar = { x: a.x - na.x * half, z: a.z - na.z * half };
+      const bl = { x: b.x + nb.x * half, z: b.z + nb.z * half };
+      const br_ = { x: b.x - nb.x * half, z: b.z - nb.z * half };
+
+      // ── Deck slab — 4 quads (top, bottom, left side, right side).
+      //   Winding picked so right-hand-rule normals point outward in
+      //   our +X-east / +Z-south frame (same convention as walls/roads).
+
+      // Top face (visible from above)
+      deckPositions.push(
+        al.x, deckTopY, al.z,  br_.x, deckTopY, br_.z,  ar.x, deckTopY, ar.z,
+        al.x, deckTopY, al.z,  bl.x,  deckTopY, bl.z,   br_.x, deckTopY, br_.z
+      );
+      // Bottom face (visible from below)
+      deckPositions.push(
+        al.x, deckBotY, al.z,  ar.x, deckBotY, ar.z,  br_.x, deckBotY, br_.z,
+        al.x, deckBotY, al.z,  br_.x, deckBotY, br_.z, bl.x, deckBotY, bl.z
+      );
+      // Left side (al-ar are on +normal side, so 'left' = al/bl edge)
+      deckPositions.push(
+        al.x, deckBotY, al.z,  bl.x, deckTopY, bl.z,  al.x, deckTopY, al.z,
+        al.x, deckBotY, al.z,  bl.x, deckBotY, bl.z,  bl.x, deckTopY, bl.z
+      );
+      // Right side
+      deckPositions.push(
+        ar.x, deckBotY, ar.z,  ar.x, deckTopY, ar.z,  br_.x, deckTopY, br_.z,
+        ar.x, deckBotY, ar.z,  br_.x, deckTopY, br_.z, br_.x, deckBotY, br_.z
+      );
+
+      // ── Parapets — vertical walls on both sides above the deck.
+      //   Outer face only; the inside of a parapet is rarely visible.
+      const pTop = deckTopY + PARAPET_H;
+      // Left parapet — outer face points outward (+normal direction).
+      // Slightly inset so it sits on the deck, not flush with the edge.
+      const li = PARAPET_T * 0.5;
+      const al2 = { x: al.x - na.x * li, z: al.z - na.z * li };
+      const bl2 = { x: bl.x - nb.x * li, z: bl.z - nb.z * li };
+      parapetPositions.push(
+        al2.x, deckTopY, al2.z,  bl2.x, pTop,     bl2.z,  bl2.x, deckTopY, bl2.z,
+        al2.x, deckTopY, al2.z,  al2.x, pTop,     al2.z,  bl2.x, pTop,     bl2.z
+      );
+      // Right parapet
+      const ar2 = { x: ar.x + na.x * li, z: ar.z + na.z * li };
+      const br2 = { x: br_.x + nb.x * li, z: br_.z + nb.z * li };
+      parapetPositions.push(
+        ar2.x, deckTopY, ar2.z,  br2.x, deckTopY, br2.z,  br2.x, pTop,     br2.z,
+        ar2.x, deckTopY, ar2.z,  br2.x, pTop,     br2.z,  ar2.x, pTop,     ar2.z
+      );
+    }
+  }
+  if (deckPositions.length === 0) return group;
+
+  const deckGeo = new THREE.BufferGeometry();
+  deckGeo.setAttribute('position', new THREE.Float32BufferAttribute(deckPositions, 3));
+  deckGeo.computeVertexNormals();
+  const deckMat = new THREE.MeshStandardMaterial({
+    color: 0x4a4a4a,
+    roughness: 0.85,
+    metalness: 0.05,
+  });
+  deckMat.name = 'bridge_deck';
+  const deckMesh = new THREE.Mesh(deckGeo, deckMat);
+  deckMesh.castShadow = true;
+  deckMesh.receiveShadow = true;
+  group.add(deckMesh);
+
+  const parapetGeo = new THREE.BufferGeometry();
+  parapetGeo.setAttribute('position', new THREE.Float32BufferAttribute(parapetPositions, 3));
+  parapetGeo.computeVertexNormals();
+  const parapetMat = new THREE.MeshStandardMaterial({
+    color: 0xb8b4ac,
+    roughness: 0.75,
+    metalness: 0.05,
+    side: THREE.DoubleSide,  // parapets thin enough that the inside reads
+  });
+  parapetMat.name = 'bridge_parapet';
+  const parapetMesh = new THREE.Mesh(parapetGeo, parapetMat);
+  parapetMesh.castShadow = true;
+  parapetMesh.receiveShadow = true;
+  group.add(parapetMesh);
+
   return group;
 }
 
