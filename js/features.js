@@ -13,6 +13,12 @@ async function fetchGroundFeatures(bb) {
   relation["natural"="water"](${bb.s},${bb.w},${bb.n},${bb.e});
   way["landuse"="forest"](${bb.s},${bb.w},${bb.n},${bb.e});
   way["natural"="wood"](${bb.s},${bb.w},${bb.n},${bb.e});
+  way["leisure"="park"](${bb.s},${bb.w},${bb.n},${bb.e});
+  way["leisure"="garden"](${bb.s},${bb.w},${bb.n},${bb.e});
+  way["landuse"="village_green"](${bb.s},${bb.w},${bb.n},${bb.e});
+  way["landuse"="grass"](${bb.s},${bb.w},${bb.n},${bb.e});
+  way["landuse"="cemetery"](${bb.s},${bb.w},${bb.n},${bb.e});
+  way["natural"="scrub"](${bb.s},${bb.w},${bb.n},${bb.e});
   node["natural"="tree"](${bb.s},${bb.w},${bb.n},${bb.e});
 );
 out body;>;out skel qt;`;
@@ -42,6 +48,18 @@ const ROAD_STYLES = {
   track:         { w: 3.5, color: 0x9a8a72 },
 };
 
+// Vegetation areas with their tree-sprinkle density (trees per m²). Higher
+// for actual woods, lower for ornamental parks so a city park reads as
+// foliage without overwhelming the GPU.
+const VEGETATION_DENSITY = {
+  forest: 0.0010,
+  park:   0.0005,
+  garden: 0.0008,
+  cemetery: 0.0003,
+  grass: 0.0002,
+  scrub: 0.0006,
+};
+
 function parseGroundFeatures(elements, bb) {
   const nodeMap = {};
   elements.filter(e => e.type === 'node').forEach(n => { nodeMap[n.id] = n; });
@@ -62,8 +80,16 @@ function parseGroundFeatures(elements, bb) {
         roads.push({ coords, ...style });
       } else if (t.natural === 'water' || t.water || t.waterway === 'riverbank') {
         if (coords.length >= 3) waters.push({ coords });
-      } else if (t.landuse === 'forest' || t.natural === 'wood') {
-        if (coords.length >= 3) forests.push({ coords });
+      } else if (coords.length >= 3) {
+        // Classify any vegetation polygon by its expected planting density.
+        let density = 0;
+        if (t.landuse === 'forest' || t.natural === 'wood')        density = VEGETATION_DENSITY.forest;
+        else if (t.leisure === 'park')                              density = VEGETATION_DENSITY.park;
+        else if (t.leisure === 'garden')                            density = VEGETATION_DENSITY.garden;
+        else if (t.landuse === 'cemetery')                          density = VEGETATION_DENSITY.cemetery;
+        else if (t.landuse === 'village_green' || t.landuse === 'grass') density = VEGETATION_DENSITY.grass;
+        else if (t.natural === 'scrub')                             density = VEGETATION_DENSITY.scrub;
+        if (density > 0) forests.push({ coords, density });
       }
     } else if (e.type === 'node' && e.tags && e.tags.natural === 'tree') {
       trees.push({ lat: e.lat, lon: e.lon });
@@ -216,56 +242,85 @@ function createWater(waters, bb, elevGrid, gridN, vertExag) {
 function createTrees(treePoints, forests, bb, elevGrid, gridN, vertExag) {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
 
-  // Sprinkle random trees inside each forest/wood polygon. Density tuned
-  // so a city park reads as foliage without the GPU hitting a wall.
-  const FOREST_DENSITY = 0.0008; // trees per m²
-  const all = treePoints.slice();
+  // Sprinkle random trees inside each vegetation polygon, with the density
+  // already stamped on the polygon by parseGroundFeatures.
+  const placements = treePoints.map(t => ({ lat: t.lat, lon: t.lon }));
+  const MAX_TOTAL = 8000;       // safety cap
+
   for (const f of forests) {
+    if (placements.length >= MAX_TOTAL) break;
     const pts = f.coords.map(c => ({ x: toLocalX(c.lon, bb), z: toLocalZ(c.lat, bb) }));
     let minX = +Infinity, maxX = -Infinity, minZ = +Infinity, maxZ = -Infinity;
     for (const p of pts) {
       if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
       if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
     }
-    const area = Math.max(0, (maxX - minX) * (maxZ - minZ));
-    const target = Math.min(800, Math.round(area * FOREST_DENSITY));
-    for (let i = 0; i < target * 3 && all.length < (treePoints.length + 4000); i++) {
+    const bboxArea = Math.max(0, (maxX - minX) * (maxZ - minZ));
+    const target = Math.min(1200, Math.round(bboxArea * (f.density || 0.0005)));
+    if (target <= 0) continue;
+    // Rejection-sample inside the polygon; cap attempts at 4× target.
+    let placed = 0, attempts = 0;
+    while (placed < target && attempts < target * 4 && placements.length < MAX_TOTAL) {
+      attempts++;
       const x = minX + Math.random() * (maxX - minX);
       const z = minZ + Math.random() * (maxZ - minZ);
-      if (_pointInPoly(x, z, pts)) {
-        const lat = bb.s + (1 - z / zSize) * (bb.n - bb.s);
-        const lon = bb.w + (x / xSize) * (bb.e - bb.w);
-        all.push({ lat, lon });
-        if (all.length - treePoints.length >= target) break;
-      }
+      if (!_pointInPoly(x, z, pts)) continue;
+      if (x < 0 || x > xSize || z < 0 || z > zSize) continue;
+      const lat = bb.s + (1 - z / zSize) * (bb.n - bb.s);
+      const lon = bb.w + (x / xSize) * (bb.e - bb.w);
+      placements.push({ lat, lon });
+      placed++;
     }
   }
-  if (all.length === 0) return new THREE.Group();
+  if (placements.length === 0) return new THREE.Group();
 
-  // One simple tree mesh: a brown trunk cylinder + a green crown cone.
-  const trunkGeo = new THREE.CylinderGeometry(0.25, 0.35, 2.5, 5);
+  // Trunk + crown sized for a roughly 7-8 m tree at scale 1.
+  const trunkGeo = new THREE.CylinderGeometry(0.25, 0.35, 2.5, 6);
   trunkGeo.translate(0, 1.25, 0);
   const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3520, roughness: 0.9 });
   trunkMat.name = 'tree_trunk';
 
-  const crownGeo = new THREE.ConeGeometry(2.2, 5.5, 7);
+  const crownGeo = new THREE.ConeGeometry(2.2, 5.5, 8);
   crownGeo.translate(0, 2.5 + 2.75, 0);
-  const crownMat = new THREE.MeshStandardMaterial({ color: 0x3a6a32, roughness: 0.85 });
+  // vertexColors so each instance can shift the crown's hue slightly.
+  const crownMat = new THREE.MeshStandardMaterial({
+    color: 0x4a8a3a,
+    roughness: 0.85,
+    vertexColors: false,
+  });
   crownMat.name = 'tree_crown';
 
-  const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, all.length);
-  const crowns = new THREE.InstancedMesh(crownGeo, crownMat, all.length);
+  // Count only trees inside the bbox; we'll size the InstancedMesh tightly.
+  const inside = [];
+  for (const t of placements) {
+    const x = toLocalX(t.lon, bb), z = toLocalZ(t.lat, bb);
+    if (x >= 0 && x <= xSize && z >= 0 && z <= zSize) inside.push({ x, z });
+  }
+  if (inside.length === 0) return new THREE.Group();
+
+  const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, inside.length);
+  const crowns = new THREE.InstancedMesh(crownGeo, crownMat, inside.length);
+  // CRITICAL: r128's default bounding sphere is computed from the local
+  // geometry only, not the instance positions. Our instances are spread
+  // across hundreds of metres while the local geometry is a ~2 m tree at
+  // the origin, so the entire InstancedMesh gets frustum-culled the moment
+  // the camera looks at the terrain centre instead of the origin. Disable
+  // culling — vegetation never needs it.
+  trunks.frustumCulled = crowns.frustumCulled = false;
   trunks.castShadow = crowns.castShadow = true;
   trunks.receiveShadow = crowns.receiveShadow = false;
+  // Per-instance crown tint so the forest doesn't look like one paint chip.
+  crowns.instanceColor = new THREE.InstancedBufferAttribute(
+    new Float32Array(inside.length * 3), 3
+  );
 
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const pos = new THREE.Vector3();
   const scl = new THREE.Vector3();
-  for (let i = 0; i < all.length; i++) {
-    const t = all[i];
-    const x = toLocalX(t.lon, bb), z = toLocalZ(t.lat, bb);
-    if (x < 0 || x > xSize || z < 0 || z > zSize) continue;
+  const baseHue = new THREE.Color();
+  for (let i = 0; i < inside.length; i++) {
+    const { x, z } = inside[i];
     const y = getElevAt(elevGrid, gridN, x / xSize, z / zSize) * vertExag;
     const s = 0.7 + Math.random() * 0.7;
     pos.set(x, y, z); scl.set(s, s, s);
@@ -273,9 +328,18 @@ function createTrees(treePoints, forests, bb, elevGrid, gridN, vertExag) {
     m.compose(pos, q, scl);
     trunks.setMatrixAt(i, m);
     crowns.setMatrixAt(i, m);
+
+    // Random crown colour: olive → sage → forest. Three.js multiplies
+    // material.color by instanceColor, so a value near 1 leaves the
+    // material colour intact while small offsets shift the hue.
+    baseHue.setHSL(0.28 + (Math.random() - 0.5) * 0.06,
+                   0.45 + Math.random() * 0.25,
+                   0.40 + Math.random() * 0.18);
+    crowns.setColorAt(i, baseHue);
   }
   trunks.instanceMatrix.needsUpdate = true;
   crowns.instanceMatrix.needsUpdate = true;
+  if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
 
   const group = new THREE.Group();
   group.name = 'trees';

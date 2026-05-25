@@ -18,6 +18,66 @@ out body;>;out skel qt;`;
   return json.elements;
 }
 
+// Most OSM buildings (especially in Japan) have no `roof:shape` tag — so
+// if we trusted the tag literally every roof would default to flat and the
+// city would look like a parking lot of grey boxes. Infer a plausible
+// shape from the building type, footprint area, and height instead.
+function _inferRoofShape(tags, areaM2, height) {
+  if (tags['roof:shape']) return tags['roof:shape'].toLowerCase();
+
+  const t = (tags.building || '').toLowerCase();
+
+  // Religious / heritage architecture almost always has a sloped roof.
+  if (['church','cathedral','chapel'].includes(t))       return 'pyramidal';
+  if (['temple','shrine','pagoda'].includes(t))          return 'pyramidal';
+  if (t === 'mosque')                                    return 'dome';
+  if (t === 'castle' || t === 'tower')                   return 'pyramidal';
+
+  // Small detached houses → gabled roof. Cap by footprint + height so a
+  // 200 m tall "house" tag doesn't get a pitched roof.
+  if (areaM2 < 250 && height < 14 &&
+      ['house','detached','residential','bungalow','cabin',
+       'cottage','semidetached_house','farm'].includes(t)) {
+    return 'gabled';
+  }
+
+  // Barns and small farm buildings → hipped.
+  if (areaM2 < 600 && height < 12 &&
+      ['barn','farm_auxiliary','stable','greenhouse','hut','shed'].includes(t)) {
+    return 'hipped';
+  }
+
+  // Schools, town halls, civic buildings → hipped if not too big.
+  if (areaM2 < 1500 && height < 18 &&
+      ['school','kindergarten','civic','public','townhall'].includes(t)) {
+    return 'hipped';
+  }
+
+  // Default — apartments, offices, retail, industrial, anything large.
+  return 'flat';
+}
+
+function _inferRoofHeight(shape, totalH, areaM2) {
+  if (shape === 'flat') return 0;
+  if (shape === 'dome' || shape === 'onion') {
+    // Bigger domes need more rise to look like a dome and not a contact lens.
+    return Math.min(Math.max(3, Math.sqrt(areaM2) * 0.25), totalH * 0.6);
+  }
+  // Gabled / hipped / pyramidal: 25–40 % of total height, clamped 2..8 m.
+  return Math.min(8, Math.max(2, totalH * 0.32));
+}
+
+// Polygon area in m² using the shoelace formula in local-XZ space.
+function _footprintAreaM2(coords, bb) {
+  let a2 = 0;
+  for (let i = 0; i < coords.length; i++) {
+    const A = coords[i], B = coords[(i + 1) % coords.length];
+    a2 += toLocalX(A.lon, bb) * toLocalZ(B.lat, bb)
+        - toLocalX(B.lon, bb) * toLocalZ(A.lat, bb);
+  }
+  return Math.abs(a2) / 2;
+}
+
 function parseBuildings(elements, bb) {
   const nodeMap = {};
   elements.filter(e => e.type === 'node').forEach(n => { nodeMap[n.id] = n; });
@@ -35,12 +95,13 @@ function parseBuildings(elements, bb) {
     const levels   = levelsRaw ? parseFloat(levelsRaw) : 2;
     const height   = tags.height ? parseFloat(tags.height) : Math.max(3, levels * 3.2);
     const minH     = tags.min_height ? parseFloat(tags.min_height) : 0;
-    const roofH    = tags['roof:height'] ? parseFloat(tags['roof:height'])
-                    : (tags['roof:shape'] && tags['roof:shape'] !== 'flat'
-                        ? Math.min(height * 0.3, 6) : 0);
-    const roofShape = (tags['roof:shape'] || 'flat').toLowerCase();
 
-    buildings.push({ coords, height, minH, roofH, roofShape, tags });
+    const area     = _footprintAreaM2(coords, bb);
+    const roofShape = _inferRoofShape(tags, area, height);
+    const roofH    = tags['roof:height'] ? parseFloat(tags['roof:height'])
+                                         : _inferRoofHeight(roofShape, height, area);
+
+    buildings.push({ coords, height, minH, roofH, roofShape, area, tags });
   });
   return buildings;
 }
