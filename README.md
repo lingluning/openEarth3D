@@ -20,6 +20,16 @@
 
 > **注意**: 外部 API へのリクエストが必要なため、インターネット接続が必要です。
 
+### `plateau.html` を使う場合
+
+PLATEAU ビューアは Cesium を利用しており、Web Worker の都合で `file://` から直接開くと動作しません（`Tracking Prevention blocked access to storage` / `importScripts ... failed to load` エラーになります）。簡易 HTTP サーバ経由で開いてください:
+
+```bash
+# プロジェクトフォルダで実行
+python -m http.server 8000
+# ブラウザで http://localhost:8000/plateau.html を開く
+```
+
 ## 操作方法
 
 | 操作 | 動作 |

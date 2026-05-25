@@ -4,6 +4,11 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>PLATEAU 3D City Viewer</title>
+<script>
+  // Cesium loads its Web Worker scripts relative to this base URL.
+  // Setting it explicitly avoids broken blob-worker bootstrapping.
+  window.CESIUM_BASE_URL = 'https://cdn.jsdelivr.net/npm/cesium@1.114.0/Build/Cesium/';
+</script>
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.114.0/Build/Cesium/Cesium.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.114.0/Build/Cesium/Widgets/widgets.css"/>
 <style>
@@ -128,6 +133,28 @@ select:focus{border-color:#4fc3f7}
 <button id="backBtn" onclick="location.href='index.html'">← openEarth3D</button>
 
 <script>
+// ── file:// guard ──────────────────────────────────────────────────────────
+// Cesium spawns Web Workers via blob: URLs. When this page is opened
+// directly as a local file, blob URLs inherit a `null` origin, and the
+// browser blocks `importScripts` between blobs with
+// "Not allowed to load local resource". The viewer never starts.
+// Detect that case up front and show a helpful message instead of the
+// cryptic worker errors.
+if (location.protocol === 'file:') {
+  const status = document.getElementById('statusBar');
+  const btn = document.getElementById('loadBtn');
+  if (status) {
+    status.innerHTML =
+      '⚠️ <b>ローカルファイル（file://）では動作しません</b><br>' +
+      'Cesium の Web Worker がブロックされます。<br>' +
+      'プロジェクトフォルダで以下を実行してください:<br>' +
+      '<code style="color:#4fc3f7">python -m http.server 8000</code><br>' +
+      'その後 <code style="color:#4fc3f7">http://localhost:8000/plateau.html</code> を開いてください。';
+  }
+  if (btn) btn.disabled = true;
+  throw new Error('plateau.html must be served over HTTP (not file://)');
+}
+
 // ── Known fallback tileset URLs (used when API is unavailable) ─────────────
 const KNOWN_TILESETS = {
   '13101': 'https://assets.cms.plateau.reearth.io/assets/0e/e5948a-e95c-4e31-be85-1f8c066ed996/13101_chiyoda-ku_pref_2023_citygml_1_op_bldg_3dtiles_13101_chiyoda-ku_lod1/tileset.json',

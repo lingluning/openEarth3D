@@ -20,53 +20,64 @@ function deg2tileFrac(lat, lon, z) {
   };
 }
 
-// Decode a GSI DEM PNG tile → Float32Array(256*256) of elevations in metres
-// Returns null on 404 (sea area or outside Japan) — caller should fallback
+// GSI DEM sources, tried in order at the same (z,tx,ty):
+//   dem5a_png — 5m DEM, narrowest coverage (excludes outer islands)
+//   dem_png   — 10m DEM, covers essentially all of Japan
+// Outside Japan both 404 and the cascade falls back to Terrarium.
+// We use fetch() instead of <img> so 404s stay out of the console.
+const GSI_DEM_SOURCES = ['dem5a_png', 'dem_png'];
+
+// Decode a DEM PNG blob → Float32Array(256*256) using the given (r,g,b)→elev fn
+async function decodeDemBlob(blob, decode) {
+  const bitmap = await createImageBitmap(blob);
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, 256, 256);
+  bitmap.close && bitmap.close();
+  const px = ctx.getImageData(0, 0, 256, 256).data;
+  const arr = new Float32Array(256 * 256);
+  for (let i = 0; i < 256 * 256; i++) {
+    arr[i] = decode(px[i * 4], px[i * 4 + 1], px[i * 4 + 2]);
+  }
+  return arr;
+}
+
+// GSI PNG encoding: signed 24-bit, 0.01m units, 0x800000 = no-data
+function decodeGsi(r, g, b) {
+  const v = r * 65536 + g * 256 + b;
+  return v === 8388608 ? 0 : v < 8388608 ? v * 0.01 : (v - 16777216) * 0.01;
+}
+
+// Terrarium PNG encoding: elevation = R*256 + G + B/256 - 32768
+function decodeTerrarium(r, g, b) {
+  return r * 256 + g + b / 256 - 32768;
+}
+
+// GSI DEM tile (Japan only). Tries dem5a then dem. Returns null silently
+// on 404 — the cascade caller will fall back to global Terrarium.
 async function fetchDemTile(z, tx, ty) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = c.height = 256;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      const px = ctx.getImageData(0, 0, 256, 256).data;
-      const arr = new Float32Array(256 * 256);
-      for (let i = 0; i < 256 * 256; i++) {
-        const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
-        const v = r * 65536 + g * 256 + b;
-        arr[i] = v === 8388608 ? 0 : v < 8388608 ? v * 0.01 : (v - 16777216) * 0.01;
-      }
-      resolve(arr);
-    };
-    img.onerror = () => resolve(null); // 404 → null, no crash
-    img.src = `https://cyberjapandata.gsi.go.jp/xyz/dem5a_png/${z}/${tx}/${ty}.png`;
-  });
+  for (const name of GSI_DEM_SOURCES) {
+    try {
+      const res = await fetch(`https://cyberjapandata.gsi.go.jp/xyz/${name}/${z}/${tx}/${ty}.png`);
+      if (!res.ok) continue;
+      return await decodeDemBlob(await res.blob(), decodeGsi);
+    } catch {
+      // network error → try next source
+    }
+  }
+  return null;
 }
 
 // AWS Terrarium global DEM (ex-Mapzen, free, no key, full global coverage)
-// Encoding: elevation = R*256 + G + B/256 - 32768
 async function fetchTerrariumTile(z, tx, ty) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = c.height = 256;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      const px = ctx.getImageData(0, 0, 256, 256).data;
-      const arr = new Float32Array(256 * 256);
-      for (let i = 0; i < 256 * 256; i++) {
-        const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
-        arr[i] = r * 256 + g + b / 256 - 32768;
-      }
-      resolve(arr);
-    };
-    img.onerror = () => resolve(null);
-    img.src = `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`;
-  });
+  try {
+    const res = await fetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`);
+    if (!res.ok) return null;
+    return await decodeDemBlob(await res.blob(), decodeTerrarium);
+  } catch {
+    return null;
+  }
 }
 
 // Bilinear sample from a decoded tile array
