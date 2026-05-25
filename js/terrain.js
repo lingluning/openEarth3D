@@ -20,30 +20,45 @@ function deg2tileFrac(lat, lon, z) {
   };
 }
 
-// Decode a GSI DEM PNG tile → Float32Array(256*256) of elevations in metres
+// GSI DEM sources, tried in order at the same (z,tx,ty):
+//   dem5a_png — 5m DEM, narrowest coverage (excludes outer islands)
+//   dem_png   — 10m DEM, covers essentially all of Japan
+// We use fetch() instead of <img> so 404s stay out of the console.
+const DEM_SOURCES = ['dem5a_png', 'dem_png'];
+
+async function decodeDemBlob(blob) {
+  const bitmap = await createImageBitmap(blob);
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, 256, 256);
+  bitmap.close && bitmap.close();
+  const px = ctx.getImageData(0, 0, 256, 256).data;
+  const arr = new Float32Array(256 * 256);
+  for (let i = 0; i < 256 * 256; i++) {
+    const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+    const v = r * 65536 + g * 256 + b;
+    // 8388608 (0x800000) = no-data sentinel
+    arr[i] = v === 8388608 ? 0 : v < 8388608 ? v * 0.01 : (v - 16777216) * 0.01;
+  }
+  return arr;
+}
+
+// Decode a GSI DEM PNG tile → Float32Array(256*256) of elevations in metres.
+// Falls back from dem5a (5m) to dem (10m) on 404. Returns null if both miss,
+// letting the caller fall through to the global per-point elevation API.
 async function fetchDemTile(z, tx, ty) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = c.height = 256;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      const px = ctx.getImageData(0, 0, 256, 256).data;
-      const arr = new Float32Array(256 * 256);
-      for (let i = 0; i < 256 * 256; i++) {
-        const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
-        const v = r * 65536 + g * 256 + b;
-        // 8388608 (0x800000) = no-data sentinel
-        arr[i] = v === 8388608 ? 0 : v < 8388608 ? v * 0.01 : (v - 16777216) * 0.01;
-      }
-      resolve(arr);
-    };
-    img.onerror = () => resolve(null);
-    // dem5a_png: ~5m DEM, zoom 9-15 (Japan only)
-    img.src = `https://cyberjapandata.gsi.go.jp/xyz/dem5a_png/${z}/${tx}/${ty}.png`;
-  });
+  for (const name of DEM_SOURCES) {
+    const url = `https://cyberjapandata.gsi.go.jp/xyz/${name}/${z}/${tx}/${ty}.png`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      return await decodeDemBlob(await res.blob());
+    } catch {
+      // network error → try next source
+    }
+  }
+  return null;
 }
 
 // Bilinear sample from a decoded tile array
