@@ -12,12 +12,14 @@ function initScene(canvas) {
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.0;
+  // Slight boost over neutral so the post-tone-map image isn't muddy.
+  // The contrast pass after this brings it the rest of the way.
+  renderer.toneMappingExposure = 1.18;
   renderer.physicallyCorrectLights = true;
 
   scene = new THREE.Scene();
   // Sky and fog colour follow the sun — both updated by setTimeOfDay().
-  scene.fog = new THREE.FogExp2(0xc8e8f8, 0.00022);
+  scene.fog = new THREE.FogExp2(0xd8dde0, 0.00018);
 
   camera = new THREE.PerspectiveCamera(50, 1, 1, 10000);
 
@@ -28,17 +30,22 @@ function initScene(canvas) {
   controls.maxDistance = 6000;
   controls.maxPolarAngle = Math.PI / 2 - 0.01;
 
-  // Physical sky (Hosek-Wilkie atmospheric scattering).
+  // Physical sky (Hosek-Wilkie atmospheric scattering). Dropped rayleigh
+  // and turbidity from the previous values — the original 2.0 / 4.0 made
+  // every PBR material reflect a deep blue dome via the env map, and the
+  // whole scene came out cyan-tinted.
   sky = new THREE.Sky();
   sky.scale.setScalar(450000);
   const u = sky.material.uniforms;
-  u.turbidity.value = 4.0;
-  u.rayleigh.value = 2.0;
-  u.mieCoefficient.value = 0.005;
-  u.mieDirectionalG.value = 0.8;
+  u.turbidity.value = 2.5;
+  u.rayleigh.value = 1.2;
+  u.mieCoefficient.value = 0.004;
+  u.mieDirectionalG.value = 0.85;
   scene.add(sky);
 
-  hemiLight = new THREE.HemisphereLight(0xc8e8ff, 0x4a4030, 0.45);
+  // Hemisphere fill: warmer / less-saturated sky tone. The ground bounce
+  // is a touch warmer too so shaded sides don't read as cold blue.
+  hemiLight = new THREE.HemisphereLight(0xe8eef2, 0x6a5640, 0.35);
   scene.add(hemiLight);
 
   sun = new THREE.DirectionalLight(0xffffff, 3.0);
@@ -86,6 +93,49 @@ function initScene(canvas) {
   startLoop();
 }
 
+// Small contrast + saturation + warm-tint adjustment, runs after bloom.
+// Tone-mapped output is usually a touch flat and slightly cool; this
+// pass nudges it toward a sharper, less-blue look without touching the
+// underlying lighting model.
+const ColorGradeShader = {
+  uniforms: {
+    tDiffuse:   { value: null },
+    contrast:   { value: 1.12 },   // around mid-gray, gentle S-curve effect
+    saturation: { value: 0.92 },   // < 1 = desaturate (kills blue dominance)
+    warmth:     { value: 0.025 },  // adds R, subtracts B for warmer cast
+    brightness: { value: 1.02 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float contrast;
+    uniform float saturation;
+    uniform float warmth;
+    uniform float brightness;
+    varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      // Brightness
+      c.rgb *= brightness;
+      // Warmth: nudge red up, blue down (preserves luminance close enough).
+      c.r = clamp(c.r + warmth, 0.0, 1.0);
+      c.b = clamp(c.b - warmth, 0.0, 1.0);
+      // Contrast around 0.5
+      c.rgb = (c.rgb - 0.5) * contrast + 0.5;
+      // Saturation around perceived luminance
+      float lum = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+      c.rgb = mix(vec3(lum), c.rgb, saturation);
+      gl_FragColor = vec4(clamp(c.rgb, 0.0, 1.0), c.a);
+    }
+  `,
+};
+
 function initComposer() {
   if (typeof THREE.EffectComposer !== 'function') return;
   composer = new THREE.EffectComposer(renderer);
@@ -94,11 +144,15 @@ function initComposer() {
   if (typeof THREE.UnrealBloomPass === 'function') {
     const bloom = new THREE.UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.35,  // strength — subtle, only glassy reflections / sun glints
+      0.30,  // strength — subtle, only glassy reflections / sun glints
       0.85,  // radius
-      0.92   // threshold (only the brightest pixels bloom)
+      0.94   // threshold — bumped so the sky doesn't bloom into haze
     );
     composer.addPass(bloom);
+  }
+
+  if (typeof THREE.ShaderPass === 'function') {
+    composer.addPass(new THREE.ShaderPass(ColorGradeShader));
   }
 }
 
@@ -133,28 +187,34 @@ function setTimeOfDay(hour) {
   sky.material.uniforms.sunPosition.value.copy(sunPos);
 
   // Sun colour and intensity vs. elevation. Below horizon → blue moonlight.
+  // Sun is intentionally stronger than the hemi fill so direct/indirect
+  // light has clear separation — that's where most of the perceived
+  // contrast lives in a daytime scene.
   if (elev > 0.02) {
     const warm = Math.pow(1 - Math.max(0, elev), 2); // 0 at noon, 1 at horizon
     sun.color.setRGB(
       1.0,
-      0.85 + 0.15 * (1 - warm),
-      0.55 + 0.45 * (1 - warm)
+      0.88 + 0.12 * (1 - warm),
+      0.65 + 0.35 * (1 - warm)
     );
-    sun.intensity = 0.6 + 2.8 * Math.max(0, elev);
-    hemiLight.intensity = 0.35 + 0.4 * elev;
-    hemiLight.color.setRGB(0.78 + 0.22*(1-warm), 0.91, 1.0);
+    sun.intensity = 0.7 + 3.4 * Math.max(0, elev);
+    // Hemi fill kept low (~1/4 of sun) and close to neutral so it tints
+    // the shadows only slightly. Previously it ramped to (0.78, 0.91, 1.0)
+    // — pure blue cap — which turned every concrete surface cyan.
+    hemiLight.intensity = 0.18 + 0.22 * elev;
+    hemiLight.color.setRGB(0.93, 0.95 + 0.04*(1-warm), 1.0);
   } else {
     sun.color.setRGB(0.4, 0.5, 0.7);
     sun.intensity = 0.05;
-    hemiLight.intensity = 0.15;
-    hemiLight.color.setRGB(0.3, 0.4, 0.6);
+    hemiLight.intensity = 0.12;
+    hemiLight.color.setRGB(0.32, 0.42, 0.6);
   }
 
-  // Fog colour follows the lit sky: blue at midday, warm at golden hour,
-  // dark blue at night.
-  const fogR = Math.max(0.04, 0.25 + 0.75 * Math.max(0, elev) - 0.3 * Math.pow(1-elev, 2));
-  const fogG = Math.max(0.05, 0.35 + 0.55 * Math.max(0, elev));
-  const fogB = Math.max(0.08, 0.45 + 0.45 * Math.max(0, elev));
+  // Fog colour follows the lit sky but stays much more neutral than before
+  // — heavy blue fog washed out distant buildings into a single blue mush.
+  const fogR = Math.max(0.05, 0.45 + 0.50 * Math.max(0, elev));
+  const fogG = Math.max(0.06, 0.50 + 0.45 * Math.max(0, elev));
+  const fogB = Math.max(0.10, 0.55 + 0.40 * Math.max(0, elev));
   scene.fog.color.setRGB(fogR, fogG, fogB);
   renderer.setClearColor(scene.fog.color);
 
@@ -225,8 +285,14 @@ function buildTerrain(grid, n, xSize, zSize, texDataUrl, vertExag) {
   tex.encoding = THREE.sRGBEncoding;
   tex.name = 'aerial';
   // MeshStandardMaterial picks up sky lighting via PBR; roughness keeps it
-  // non-reflective so the aerial-photo texture reads cleanly.
-  const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95, metalness: 0.0 });
+  // non-reflective so the aerial-photo texture reads cleanly. envMap
+  // intensity dialled down so the terrain doesn't get the sky's blue cast.
+  const mat = new THREE.MeshStandardMaterial({
+    map: tex,
+    roughness: 0.97,
+    metalness: 0.0,
+    envMapIntensity: 0.4,
+  });
   mat.name = 'terrain';
 
   const span = Math.max(xSize, zSize);

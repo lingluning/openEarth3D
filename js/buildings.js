@@ -356,7 +356,9 @@ function _getWallMat(style) {
     map:       tex,
     roughness: style.pbr.rough,
     metalness: style.pbr.metal,
-    envMapIntensity: 1.0,
+    // 0.45 is enough for glass to read as reflective without flooding
+    // every concrete surface with sky-blue ambient.
+    envMapIntensity: style.type === 'glass' ? 0.7 : 0.35,
   });
   mat.name = `wall_${key}`;
   _matCache.wall[key] = mat;
