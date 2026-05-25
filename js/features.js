@@ -22,12 +22,9 @@ async function fetchGroundFeatures(bb) {
   node["natural"="tree"](${bb.s},${bb.w},${bb.n},${bb.e});
 );
 out body;>;out skel qt;`;
-  const res = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    body: 'data=' + encodeURIComponent(q),
-  });
-  const json = await res.json();
-  return json.elements;
+  // _overpassJson lives in buildings.js; it surfaces 429 / 504 cleanly
+  // instead of letting res.json() throw an unhelpful SyntaxError.
+  return _overpassJson(q);
 }
 
 // ── Road width and colour per OSM `highway=` tag ───────────────────────────

@@ -1,15 +1,5 @@
 'use strict';
 
-async function fetchElev(lat, lon) {
-  const url = `https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php`
-            + `?lon=${lon.toFixed(6)}&lat=${lat.toFixed(6)}&outtype=JSON`;
-  try {
-    const d = await (await fetch(url)).json();
-    const v = d.elevation;
-    return (v != null && v !== 'e') ? parseFloat(v) : 0;
-  } catch { return 0; }
-}
-
 // Fractional tile position (not floored)
 function deg2tileFrac(lat, lon, z) {
   const n = Math.pow(2, z);
@@ -226,39 +216,6 @@ async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
   return grid;
 }
 
-// Fallback: individual-point API (works globally, slower, lower resolution)
-async function fetchElevGrid(bb, n, onProgress) {
-  const lats = Array.from({ length: n }, (_, i) => bb.n - i * (bb.n - bb.s) / (n - 1));
-  const lons = Array.from({ length: n }, (_, i) => bb.w + i * (bb.e - bb.w) / (n - 1));
-  const grid = [];
-  let done = 0;
-  for (let r = 0; r < n; r++) {
-    const row = [];
-    for (let c = 0; c < n; c += 8) {
-      const batch = [];
-      for (let k = 0; k < 8 && c + k < n; k++) batch.push(fetchElev(lats[r], lons[c + k]));
-      const vals = await Promise.all(batch);
-      row.push(...vals);
-      done += vals.length;
-      onProgress && onProgress(done / (n * n));
-    }
-    grid.push(row);
-  }
-  // smooth zero islands
-  for (let r = 0; r < n; r++) {
-    for (let c = 0; c < n; c++) {
-      if (grid[r][c] === 0) {
-        const nb = [];
-        if (r > 0 && grid[r-1][c]) nb.push(grid[r-1][c]);
-        if (r < n-1 && grid[r+1][c]) nb.push(grid[r+1][c]);
-        if (c > 0 && grid[r][c-1]) nb.push(grid[r][c-1]);
-        if (c < n-1 && grid[r][c+1]) nb.push(grid[r][c+1]);
-        if (nb.length) grid[r][c] = nb.reduce((a, b) => a + b, 0) / nb.length;
-      }
-    }
-  }
-  return grid;
-}
 
 // Photo tile sources
 const PHOTO_SOURCES = {
@@ -365,7 +322,12 @@ async function fetchAerialPhoto(bb, zoom, onProgress, source = 'esri') {
   const ch = Math.min(cvs.height - cy, Math.round(yMax - yMin));
 
   const out = document.createElement('canvas');
-  out.width = Math.min(cw, 4096); out.height = Math.min(ch, 4096);
+  // Cap at 4096 on the long edge with a single uniform scale; clamping
+  // width and height independently would squash the photo non-uniformly
+  // and the texture would no longer line up with OSM building positions.
+  const scale = Math.min(1, 4096 / Math.max(cw, ch));
+  out.width  = Math.max(1, Math.round(cw * scale));
+  out.height = Math.max(1, Math.round(ch * scale));
   out.getContext('2d').drawImage(cvs, cx, cy, cw, ch, 0, 0, out.width, out.height);
   return out.toDataURL('image/jpeg', 0.95);
 }

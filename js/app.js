@@ -156,16 +156,20 @@ async function run() {
   currentBuildings = null;
 
   // ── Step 4: buildings + ground features ────────────────────────────────
-  // Both OSM queries run in parallel; the roads/water/trees layer is light
-  // enough that it almost always finishes before the buildings.
+  // Both OSM queries run in parallel and independently — if buildings 429
+  // out we still want roads/water/trees, and vice-versa.
   if (showBuildings) {
     setProgress(0.75, 'OSMデータ取得中（建物・道路・水域）…');
-    try {
-      const [bElems, gElems] = await Promise.all([
-        fetchBuildings(bb),
-        fetchGroundFeatures(bb).catch(() => []),
-      ]);
+    const [bRes, gRes] = await Promise.allSettled([
+      fetchBuildings(bb),
+      fetchGroundFeatures(bb),
+    ]);
+    const bElems = bRes.status === 'fulfilled' ? bRes.value : [];
+    const gElems = gRes.status === 'fulfilled' ? gRes.value : [];
+    if (bRes.status === 'rejected') console.warn('建物取得失敗:', bRes.reason);
+    if (gRes.status === 'rejected') console.warn('地物取得失敗:', gRes.reason);
 
+    try {
       // Ground features first so buildings draw on top (they're taller and
       // shouldn't be blocked by water transparency).
       const feats = parseGroundFeatures(gElems, bb);
@@ -180,11 +184,14 @@ async function run() {
       const parsed = parseBuildings(bElems, bb);
       currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag);
       scene.add(currentBuildings);
+
+      const failNote = (bRes.status === 'rejected' || gRes.status === 'rejected')
+        ? ' ⚠️ 一部のOSMデータ取得失敗' : '';
       setProgress(0.96,
-        `建物 ${parsed.length} 棟・道路 ${feats.roads.length}・水域 ${feats.waters.length}・樹木 ${feats.trees.length} を生成`
+        `建物 ${parsed.length} 棟・道路 ${feats.roads.length}・水域 ${feats.waters.length}・樹木 ${feats.trees.length} を生成${failNote}`
       );
     } catch (e) {
-      console.warn('OSM取得失敗:', e);
+      console.warn('OSMジオメトリ生成失敗:', e);
     }
   }
 

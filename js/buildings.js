@@ -10,12 +10,24 @@ async function fetchBuildings(bb) {
   relation["building"](${bb.s},${bb.w},${bb.n},${bb.e});
 );
 out body;>;out skel qt;`;
+  return _overpassJson(q);
+}
+
+// Shared Overpass helper. Overpass returns plain text on 429 / 504 / 500
+// (e.g. "rate_limited"), so res.json() throws an unhelpful SyntaxError.
+// Detect that and surface the actual status code instead.
+async function _overpassJson(query) {
   const res = await fetch('https://overpass-api.de/api/interpreter', {
     method: 'POST',
-    body: 'data=' + encodeURIComponent(q),
+    body: 'data=' + encodeURIComponent(query),
   });
+  const ct = res.headers.get('content-type') || '';
+  if (!res.ok || !ct.includes('json')) {
+    const snippet = (await res.text()).slice(0, 120).replace(/\s+/g, ' ').trim();
+    throw new Error(`Overpass ${res.status}: ${snippet || res.statusText}`);
+  }
   const json = await res.json();
-  return json.elements;
+  return json.elements || [];
 }
 
 // Most OSM buildings (especially in Japan) have no `roof:shape` tag — so
@@ -74,31 +86,67 @@ function _footprintAreaM2(coords, bb) {
   return Math.abs(a2) / 2;
 }
 
+// Parse a numeric tag with a fallback. Rejects NaN, ±Infinity and negatives —
+// OSM tags can contain "yes", "approx 12", or stray units, all of which would
+// otherwise yield an unsigned-NaN building height.
+function _posFloat(raw, fallback) {
+  if (raw == null) return fallback;
+  const v = parseFloat(raw);
+  return (isFinite(v) && v > 0) ? v : fallback;
+}
+
 function parseBuildings(elements, bb) {
   const nodeMap = {};
   elements.filter(e => e.type === 'node').forEach(n => { nodeMap[n.id] = n; });
 
+  // Lookup `way` elements by id so we can resolve simple multipolygon
+  // relation outers (complex donut-shaped buildings like train stations).
+  const wayMap = {};
+  elements.filter(e => e.type === 'way').forEach(w => { wayMap[w.id] = w; });
+
+  // Yield {tags, coords} for both standalone ways and the outer ring of
+  // a `type=multipolygon` building relation. Inner rings (holes) are
+  // skipped because our extruder doesn't model holes.
+  function* iterFootprints() {
+    for (const e of elements) {
+      if (!e.tags || !e.tags.building) continue;
+      // OSM `building=no` explicitly marks "this is not a building" — common
+      // on park outlines and parking lots — so we have to exclude it.
+      if (e.tags.building === 'no') continue;
+
+      if (e.type === 'way') {
+        yield { tags: e.tags, way: e };
+      } else if (e.type === 'relation' && e.tags.type === 'multipolygon' && e.members) {
+        // Pick the first `outer` member with resolvable nodes.
+        const outer = e.members.find(m => m.type === 'way' && m.role === 'outer' && wayMap[m.ref]);
+        if (outer) yield { tags: e.tags, way: wayMap[outer.ref] };
+      }
+    }
+  }
+
   const buildings = [];
-  elements.filter(e => e.type === 'way' && e.tags && e.tags.building).forEach(way => {
+  for (const { tags, way } of iterFootprints()) {
     const coords = way.nodes
       .map(id => nodeMap[id])
       .filter(Boolean)
       .map(n => ({ lat: n.lat, lon: n.lon }));
-    if (coords.length < 3) return;
+    if (coords.length < 3) continue;
 
-    const tags = way.tags;
-    const levelsRaw = tags['building:levels'] || tags['levels'];
-    const levels   = levelsRaw ? parseFloat(levelsRaw) : 2;
-    const height   = tags.height ? parseFloat(tags.height) : Math.max(3, levels * 3.2);
-    const minH     = tags.min_height ? parseFloat(tags.min_height) : 0;
+    // Validated numerics. Defaults guard against missing / malformed tags
+    // ("yes", "12 m", negative levels) and prevent inverted geometry.
+    const levels  = _posFloat(tags['building:levels'] || tags['levels'], 2);
+    const height  = _posFloat(tags.height, Math.max(3, levels * 3.2));
+    let   minH    = _posFloat(tags.min_height, 0);
+    if (minH >= height) minH = 0; // a floating slab makes no sense; ignore
 
-    const area     = _footprintAreaM2(coords, bb);
+    const area      = _footprintAreaM2(coords, bb);
     const roofShape = _inferRoofShape(tags, area, height);
-    const roofH    = tags['roof:height'] ? parseFloat(tags['roof:height'])
-                                         : _inferRoofHeight(roofShape, height, area);
+    let   roofH     = _posFloat(tags['roof:height'], _inferRoofHeight(roofShape, height, area));
+    // Roof can't be taller than the building above its min_height base.
+    roofH = Math.min(roofH, Math.max(0, height - minH - 2));
 
     buildings.push({ coords, height, minH, roofH, roofShape, area, tags });
-  });
+  }
   return buildings;
 }
 
@@ -484,7 +532,10 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
     z: toLocalZ(c.lat, bb),
   }));
 
-  // CCW winding (positive signed area in this XZ frame).
+  // Normalise winding so the signed area is positive in our XZ frame.
+  // +X is east, +Z is south (toLocalZ uses bb.n - lat), so the +Y-up view
+  // sees this as CLOCKWISE — _makeWallsGeo / roof generators rely on
+  // that orientation for their right-hand-rule outward normals.
   let area2 = 0;
   for (let i = 0; i < pts2d.length; i++) {
     const a = pts2d[i], b = pts2d[(i + 1) % pts2d.length];
@@ -496,10 +547,12 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   const cz = pts2d.reduce((s, p) => s + p.z, 0) / pts2d.length;
   const baseElev = getElevAt(elevGrid, gridN, cx / xSize, cz / zSize) * vertExag;
 
-  const style = getBuildingStyle(building.tags);
-  const minH    = building.minH || 0;
+  // parseBuildings has already validated and clamped these so they're safe
+  // to use directly: minH < totalH, roofH ≤ totalH - minH - 2.
+  const style   = getBuildingStyle(building.tags);
+  const minH    = building.minH;
   const totalH  = building.height;
-  const roofH   = Math.min(building.roofH || 0, Math.max(0, totalH - minH - 2));
+  const roofH   = building.roofH;
   const wallTop = baseElev + minH + (totalH - roofH);
   const roofTop = baseElev + minH + totalH;
   const baseY   = baseElev + minH;

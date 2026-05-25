@@ -113,15 +113,20 @@ function setTimeOfDay(hour) {
   // for a northern-hemisphere observer.
   const t = (hour - 6) / 12;              // 0 at sunrise, 1 at sunset
   const theta = Math.PI * t;              // 0..π over the day
-  const elev = Math.sin(theta);           // -1..1
+  const elev = Math.sin(theta);           // -1..1 (sin of altitude)
   const azim = Math.PI * (0.5 + t);       // east → south → west
 
+  // Horizontal magnitude = cos(altitude) = |cos(theta)|. The naked
+  // cos(theta) flips sign after noon and (combined with the azim cos/sin)
+  // mirrored every afternoon position back to the morning side, so 3 pm
+  // ended up north-east and sunset happened in the east. abs() keeps the
+  // sun on the correct side of the sky.
   const dist = 4000;
-  const cosE = Math.cos(theta);           // east-west component
+  const horiz = Math.abs(Math.cos(theta));
   const sunPos = new THREE.Vector3(
-    dist * cosE * Math.cos(azim - Math.PI/2),
+    dist * horiz * Math.cos(azim - Math.PI/2),
     dist * elev,
-    dist * cosE * Math.sin(azim - Math.PI/2)
+    dist * horiz * Math.sin(azim - Math.PI/2)
   );
   sun.position.copy(sunPos);
   sun.target.position.set(0, 0, 0);
@@ -190,12 +195,25 @@ function clearSceneObjects() {
     if (obj instanceof THREE.Light) return;
     toRemove.push(obj);
   });
+  // All known texture slots on MeshStandardMaterial / Phong / Lambert.
+  // Leaking any of these has bitten us across many "regenerate" clicks.
+  const TEX_SLOTS = [
+    'map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap',
+    'emissiveMap', 'bumpMap', 'displacementMap', 'alphaMap',
+    'envMap', 'lightMap', 'gradientMap', 'specularMap',
+    'clearcoatMap', 'clearcoatRoughnessMap', 'clearcoatNormalMap',
+  ];
   toRemove.forEach(obj => {
     scene.remove(obj);
     if (obj.geometry) obj.geometry.dispose();
     if (obj.material) {
       const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-      mats.forEach(m => { if (m.map) m.map.dispose(); m.dispose(); });
+      mats.forEach(m => {
+        for (const k of TEX_SLOTS) {
+          if (m[k] && typeof m[k].dispose === 'function') m[k].dispose();
+        }
+        m.dispose();
+      });
     }
   });
   if (typeof resetBuildingCaches === 'function') resetBuildingCaches();
