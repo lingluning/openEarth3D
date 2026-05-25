@@ -130,6 +130,37 @@ function getBuildingStyle(tags) {
   return { wall: 0xc8c0b4, roof: 0x585048, type: 'concrete' };
 }
 
+// Cache materials by style so multiple buildings share the same
+// MeshPhongMaterial / MeshLambertMaterial instance. Cuts down dramatically
+// on the unique-material count in OBJ/DAE exports. Reset between runs
+// because clearSceneObjects() disposes the GPU resources.
+let _matCache = { wall: {}, roof: {} };
+function resetBuildingCaches() {
+  _matCache = { wall: {}, roof: {} };
+  for (const k in _facadeCache) delete _facadeCache[k];
+}
+function _getWallMat(style) {
+  const key = `${style.wall}_${style.type}`;
+  if (_matCache.wall[key]) return _matCache.wall[key];
+  const tex = makeFacadeTexture(style.wall, style.type);
+  const mat = new THREE.MeshPhongMaterial({
+    map: tex,
+    shininess: style.type === 'glass' ? 60 : 20,
+    specular: style.type === 'glass' ? new THREE.Color(0x88ccee) : new THREE.Color(0x222222),
+  });
+  mat.name = `wall_${key}`;
+  _matCache.wall[key] = mat;
+  return mat;
+}
+function _getRoofMat(style) {
+  const key = `${style.roof}`;
+  if (_matCache.roof[key]) return _matCache.roof[key];
+  const mat = new THREE.MeshLambertMaterial({ color: style.roof });
+  mat.name = `roof_${key}`;
+  _matCache.roof[key] = mat;
+  return mat;
+}
+
 function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
 
@@ -162,15 +193,7 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   // fix coordinate system: shape XY → world XZ, extrusion Z → world Y (up)
   geo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
 
-  const facadeTex = makeFacadeTexture(style.wall, style.type);
-  const wallMat = new THREE.MeshPhongMaterial({
-    map: facadeTex,
-    shininess: style.type === 'glass' ? 60 : 20,
-    specular: style.type === 'glass' ? new THREE.Color(0x88ccee) : new THREE.Color(0x222222)
-  });
-  const roofMat = new THREE.MeshLambertMaterial({ color: style.roof });
-
-  const mesh = new THREE.Mesh(geo, [wallMat, roofMat]);
+  const mesh = new THREE.Mesh(geo, [_getWallMat(style), _getRoofMat(style)]);
   mesh.position.set(0, baseElev, 0);
   mesh.castShadow = true;
   mesh.receiveShadow = true;

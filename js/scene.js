@@ -8,6 +8,10 @@ function initScene(canvas) {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputEncoding = THREE.sRGBEncoding;
+  // Filmic tone mapping flattens out blown highlights on bright aerial
+  // imagery and makes shaded sides of buildings read more naturally.
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x87ceeb);
@@ -23,9 +27,9 @@ function initScene(canvas) {
   controls.maxPolarAngle = Math.PI / 2 - 0.01;
 
   // hemisphere sky/ground light
-  scene.add(new THREE.HemisphereLight(0xc8e8ff, 0x886644, 0.6));
-  // main sun
-  const sun = new THREE.DirectionalLight(0xfff4e0, 1.2);
+  scene.add(new THREE.HemisphereLight(0xc8e8ff, 0x886644, 0.65));
+  // main sun — warmer, slightly stronger to compensate for tone mapping
+  const sun = new THREE.DirectionalLight(0xfff0d8, 1.45);
   sun.position.set(600, 900, 400);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -36,7 +40,7 @@ function initScene(canvas) {
   sun.shadow.bias = -0.0003;
   scene.add(sun);
   // soft fill from opposite side
-  const fill = new THREE.DirectionalLight(0x9ab8d8, 0.35);
+  const fill = new THREE.DirectionalLight(0x9ab8d8, 0.4);
   fill.position.set(-400, 300, -200);
   scene.add(fill);
 
@@ -76,6 +80,9 @@ function clearSceneObjects() {
       mats.forEach(m => { if (m.map) m.map.dispose(); m.dispose(); });
     }
   });
+  // Material/texture caches in buildings.js point at GPU resources we just
+  // disposed; let them be rebuilt fresh on the next run.
+  if (typeof resetBuildingCaches === 'function') resetBuildingCaches();
 }
 
 function buildTerrain(grid, n, xSize, zSize, texDataUrl, vertExag) {

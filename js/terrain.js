@@ -59,7 +59,7 @@ function decodeTerrarium(r, g, b) {
 async function fetchDemTile(z, tx, ty) {
   for (const name of GSI_DEM_SOURCES) {
     try {
-      const res = await fetch(`https://cyberjapandata.gsi.go.jp/xyz/${name}/${z}/${tx}/${ty}.png`);
+      const res = await cachedFetch(`https://cyberjapandata.gsi.go.jp/xyz/${name}/${z}/${tx}/${ty}.png`);
       if (!res.ok) continue;
       return await decodeDemBlob(await res.blob(), decodeGsi);
     } catch {
@@ -72,12 +72,28 @@ async function fetchDemTile(z, tx, ty) {
 // AWS Terrarium global DEM (ex-Mapzen, free, no key, full global coverage)
 async function fetchTerrariumTile(z, tx, ty) {
   try {
-    const res = await fetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`);
+    const res = await cachedFetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`);
     if (!res.ok) return null;
     return await decodeDemBlob(await res.blob(), decodeTerrarium);
   } catch {
     return null;
   }
+}
+
+// Parallel map with a concurrency cap. Lets us fan out tile fetches without
+// flooding the browser's request queue.
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function pump() {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, pump));
+  return results;
 }
 
 // Bilinear sample from a decoded tile array
@@ -111,16 +127,22 @@ async function fetchElevGridHiRes(bb, meshN, onProgress) {
   const txMin = Math.floor(nwF.x), txMax = Math.floor(seF.x);
   const tyMin = Math.floor(nwF.y), tyMax = Math.floor(seF.y);
 
-  const total = (txMax - txMin + 1) * (tyMax - tyMin + 1);
+  // Fan tile requests out in parallel (cap at 6 — same as the browser's
+  // typical per-host limit) so a 5×5 grid finishes in ~5× less wall time.
+  const coords = [];
+  for (let ty = tyMin; ty <= tyMax; ty++)
+    for (let tx = txMin; tx <= txMax; tx++)
+      coords.push({ tx, ty });
+
+  const total = coords.length;
   const tileMap = {};
   let done = 0;
 
-  for (let ty = tyMin; ty <= tyMax; ty++) {
-    for (let tx = txMin; tx <= txMax; tx++) {
-      tileMap[`${tx}_${ty}`] = await fetchDemTileCascade(z, tx, ty);
-      onProgress && onProgress(++done / total * 0.85);
-    }
-  }
+  await mapWithConcurrency(coords, 6, async ({ tx, ty }) => {
+    tileMap[`${tx}_${ty}`] = await fetchDemTileCascade(z, tx, ty);
+    done++;
+    onProgress && onProgress(done / total * 0.85, `地形タイル ${done}/${total} 取得中…`);
+  });
 
   const grid = [];
   for (let r = 0; r < meshN; r++) {
@@ -133,9 +155,9 @@ async function fetchElevGridHiRes(bb, meshN, onProgress) {
       row.push(sampleTile(tileMap[`${tx}_${ty}`], (frac.x - tx) * 256, (frac.y - ty) * 256));
     }
     grid.push(row);
-    onProgress && onProgress(0.85 + r / meshN * 0.15);
+    onProgress && onProgress(0.85 + r / meshN * 0.15, '地形メッシュ生成中…');
   }
-  return grid; // always returns data now (never null)
+  return grid;
 }
 
 // Fallback: individual-point API (works globally, slower, lower resolution)
@@ -200,6 +222,7 @@ async function probeRealImagery(src, tx, ty, z) {
     const c = document.createElement('canvas');
     c.width = c.height = 32;
     c.getContext('2d').drawImage(img, 0, 0, 32, 32);
+    img.close && img.close();
     const px = c.getContext('2d').getImageData(0, 0, 32, 32).data;
     // Sum colour-channel deviation. Placeholder is grayscale + low variance.
     let chrom = 0, varSum = 0, mean = 0;
@@ -219,14 +242,14 @@ async function probeRealImagery(src, tx, ty, z) {
   } catch { return false; }
 }
 
-function loadTileImg(url) {
-  return new Promise(res => {
-    const im = new Image();
-    im.crossOrigin = 'anonymous';
-    im.onload = () => res(im);
-    im.onerror = () => res(null);
-    im.src = url;
-  });
+// Fetch an image tile through the cache and decode to an ImageBitmap.
+// Returns null silently on any failure so the composite skips that tile.
+async function loadTileImg(url) {
+  try {
+    const res = await cachedFetch(url);
+    if (!res.ok) return null;
+    return await createImageBitmap(await res.blob());
+  } catch { return null; }
 }
 
 async function fetchAerialPhoto(bb, zoom, onProgress, source = 'esri') {
@@ -251,22 +274,22 @@ async function fetchAerialPhoto(bb, zoom, onProgress, source = 'esri') {
   const cvs = document.createElement('canvas');
   cvs.width = cols * 256; cvs.height = rows * 256;
   const ctx = cvs.getContext('2d');
-  let done = 0;
 
-  for (let ty = tyMin; ty <= tyMax; ty++) {
-    for (let tx = txMin; tx <= txMax; tx++) {
-      const img = await new Promise(res => {
-        const im = new Image();
-        im.crossOrigin = 'anonymous';
-        im.onload = () => res(im);
-        im.onerror = () => res(null);
-        im.src = src.url(effectiveZoom, tx, ty);
-      });
-      if (img) try { ctx.drawImage(img, (tx - txMin) * 256, (ty - tyMin) * 256, 256, 256); } catch {}
-      done++;
-      onProgress && onProgress(done / tot);
+  // Parallel download + decode, then composite onto the working canvas.
+  const coords = [];
+  for (let ty = tyMin; ty <= tyMax; ty++)
+    for (let tx = txMin; tx <= txMax; tx++)
+      coords.push({ tx, ty });
+  let done = 0;
+  await mapWithConcurrency(coords, 6, async ({ tx, ty }) => {
+    const img = await loadTileImg(src.url(effectiveZoom, tx, ty));
+    if (img) {
+      try { ctx.drawImage(img, (tx - txMin) * 256, (ty - tyMin) * 256, 256, 256); } catch {}
+      img.close && img.close();
     }
-  }
+    done++;
+    onProgress && onProgress(done / tot, `航空写真タイル ${done}/${tot} 取得中…`);
+  });
 
   const bx = txMin * 256, by = tyMin * 256;
   const xMin = lonToWorldPx(bb.w, effectiveZoom) - bx, xMax = lonToWorldPx(bb.e, effectiveZoom) - bx;

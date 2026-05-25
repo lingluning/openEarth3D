@@ -104,10 +104,12 @@ async function exportSceneAsObj(terrain, buildings, baseName) {
   const matIds = new Map();
   root.traverse(obj => {
     if (!obj.isMesh) return;
-    const m = obj.material;
-    if (!matIds.has(m)) {
-      matIds.set(m, materials.length);
-      materials.push(m);
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const m of mats) {
+      if (m && !matIds.has(m)) {
+        matIds.set(m, materials.length);
+        materials.push(m);
+      }
     }
   });
 
