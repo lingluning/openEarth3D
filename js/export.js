@@ -1,9 +1,9 @@
 'use strict';
 
-// Export the current 3D scene (terrain + buildings) as a Collada DAE file
-// bundled with its texture images, packaged in a ZIP. The output is
-// SketchUp-compatible: COLLADA 1.4.1, Y-up axis, triangulated geometry,
-// Lambert materials, PNG textures with relative paths.
+// Export the current 3D scene (terrain + buildings) in several formats.
+// All exporters clone the live meshes so the rendered scene keeps animating
+// while serialisation runs — geometry, materials and textures are shared by
+// reference, no duplication or re-encoding.
 
 function _triggerDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -16,8 +16,6 @@ function _triggerDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// Wait until the texture image is fully decoded; data-URL images load
-// synchronously enough that this usually resolves on the first tick.
 function _waitForTexture(tex) {
   return new Promise(resolve => {
     if (!tex || !tex.image) return resolve();
@@ -28,57 +26,158 @@ function _waitForTexture(tex) {
   });
 }
 
-async function exportSceneAsDae(terrain, buildings, baseName = 'openEarth3D') {
-  if (typeof THREE.ColladaExporter !== 'function') {
-    throw new Error('ColladaExporter not loaded');
-  }
-  if (typeof JSZip !== 'function') {
-    throw new Error('JSZip not loaded');
-  }
-  if (!terrain) throw new Error('No scene to export — generate the 3D view first');
-
-  // Make sure the aerial-photo texture image has decoded
+async function _buildExportRoot(terrain, buildings, name) {
+  if (!terrain) throw new Error('生成された3Dシーンがありません — まず3D表示を生成してください');
   if (terrain.material && terrain.material.map) {
     await _waitForTexture(terrain.material.map);
   }
-
-  // Clone (shares geometry, material, and textures by reference — no
-  // duplication, no re-encoding) so we can re-parent under a temporary root
-  // without yanking the live mesh out of the rendered scene.
   const root = new THREE.Group();
-  root.name = baseName;
+  root.name = name;
   root.add(terrain.clone());
   if (buildings) root.add(buildings.clone());
+  return root;
+}
 
-  const exporter = new THREE.ColladaExporter();
-  const result = exporter.parse(root, null, {
+// ── DAE (Collada) ──────────────────────────────────────────────────────────
+// SketchUp-friendly: COLLADA 1.4.1, Y-up, Lambert materials, PNG textures.
+async function exportSceneAsDae(terrain, buildings, baseName) {
+  if (typeof THREE.ColladaExporter !== 'function') throw new Error('ColladaExporter not loaded');
+  if (typeof JSZip !== 'function') throw new Error('JSZip not loaded');
+
+  const root = await _buildExportRoot(terrain, buildings, baseName);
+  const result = new THREE.ColladaExporter().parse(root, null, {
     version: '1.4.1',
     author: 'openEarth3D',
     textureDirectory: 'textures',
   });
-
   if (!result || !result.data) throw new Error('Collada export produced no data');
 
   const zip = new JSZip();
   zip.file(`${baseName}.dae`, result.data);
-
-  const folder = zip.folder('textures');
+  const tFolder = zip.folder('textures');
   for (const tex of (result.textures || [])) {
-    folder.file(`${tex.name}.${tex.ext}`, tex.data, { base64: true });
+    tFolder.file(`${tex.name}.${tex.ext}`, tex.data, { base64: true });
+  }
+  zip.file('README.txt',
+    `openEarth3D — Collada export\n` +
+    `\n` +
+    `Open ${baseName}.dae in SketchUp via File → Import.\n` +
+    `Set "Files of type" to "COLLADA (*.dae)" in the dialog.\n` +
+    `Keep the textures/ folder next to the .dae file.\n` +
+    `\n` +
+    `Axes: Y-up (SketchUp converts to its Z-up convention on import).\n` +
+    `Units: metres.\n`
+  );
+  const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+  _triggerDownload(blob, `${baseName}.zip`);
+}
+
+// ── GLB (binary glTF 2.0) ──────────────────────────────────────────────────
+// Single self-contained .glb — textures are embedded as binary buffers.
+// Universally supported: Blender, Windows 3D Viewer, web viewers, AR tools.
+async function exportSceneAsGlb(terrain, buildings, baseName) {
+  if (typeof THREE.GLTFExporter !== 'function') throw new Error('GLTFExporter not loaded');
+
+  const root = await _buildExportRoot(terrain, buildings, baseName);
+  const exporter = new THREE.GLTFExporter();
+  const arrayBuffer = await new Promise((resolve, reject) => {
+    exporter.parse(root, (out) => resolve(out), { binary: true, embedImages: true });
+    setTimeout(() => reject(new Error('GLTF export timeout')), 60000);
+  });
+  const blob = new Blob([arrayBuffer], { type: 'model/gltf-binary' });
+  _triggerDownload(blob, `${baseName}.glb`);
+}
+
+// ── OBJ + MTL + textures ───────────────────────────────────────────────────
+// Three.js's bundled OBJExporter only writes geometry; we generate the .mtl
+// ourselves so materials and texture links survive the round-trip into
+// Blender / SketchUp / 3ds Max / Cinema 4D.
+async function exportSceneAsObj(terrain, buildings, baseName) {
+  if (typeof THREE.OBJExporter !== 'function') throw new Error('OBJExporter not loaded');
+  if (typeof JSZip !== 'function') throw new Error('JSZip not loaded');
+
+  const root = await _buildExportRoot(terrain, buildings, baseName);
+
+  // Collect unique materials in traversal order so the OBJ's usemtl
+  // references line up with the .mtl file we write below.
+  const materials = [];
+  const matIds = new Map();
+  root.traverse(obj => {
+    if (!obj.isMesh) return;
+    const m = obj.material;
+    if (!matIds.has(m)) {
+      matIds.set(m, materials.length);
+      materials.push(m);
+    }
+  });
+
+  let objText = new THREE.OBJExporter().parse(root);
+  // Inject mtllib + material name reference at the top; OBJExporter doesn't.
+  objText = `mtllib ${baseName}.mtl\n` + objText;
+
+  // Render each unique texture into a PNG via an offscreen canvas.
+  const textures = [];
+  const texIds = new Map();
+  function ensureTextureFile(tex) {
+    if (!tex) return null;
+    if (texIds.has(tex)) return textures[texIds.get(tex)].file;
+    if (!tex.image) return null;
+    const c = document.createElement('canvas');
+    c.width  = tex.image.width  || tex.image.videoWidth  || 256;
+    c.height = tex.image.height || tex.image.videoHeight || 256;
+    try { c.getContext('2d').drawImage(tex.image, 0, 0, c.width, c.height); }
+    catch { return null; }
+    const file = `textures/${tex.name || 'tex_' + textures.length}.png`;
+    const base64 = c.toDataURL('image/png').split(',').pop();
+    texIds.set(tex, textures.length);
+    textures.push({ file, base64 });
+    return file;
   }
 
-  // Small README so SketchUp users know what to do
+  // .mtl writer — covers diffuse colour and diffuse-map for the materials we
+  // actually use (MeshLambertMaterial). Good enough for ~every DCC tool.
+  const mtlLines = ['# openEarth3D MTL', `# generated for ${baseName}.obj`, ''];
+  materials.forEach((m, i) => {
+    const name = (m.name && /^[\w.-]+$/.test(m.name)) ? m.name : `mat_${i}`;
+    const col  = m.color || new THREE.Color(0xffffff);
+    mtlLines.push(`newmtl ${name}`);
+    mtlLines.push(`Ka 0.2 0.2 0.2`);
+    mtlLines.push(`Kd ${col.r.toFixed(4)} ${col.g.toFixed(4)} ${col.b.toFixed(4)}`);
+    mtlLines.push(`Ks 0.0 0.0 0.0`);
+    mtlLines.push(`d 1.0`);
+    mtlLines.push(`illum 1`);
+    const texFile = ensureTextureFile(m.map);
+    if (texFile) mtlLines.push(`map_Kd ${texFile}`);
+    mtlLines.push('');
+  });
+
+  const zip = new JSZip();
+  zip.file(`${baseName}.obj`, objText);
+  zip.file(`${baseName}.mtl`, mtlLines.join('\n'));
+  const tFolder = zip.folder('textures');
+  for (const t of textures) {
+    tFolder.file(t.file.replace(/^textures\//, ''), t.base64, { base64: true });
+  }
   zip.file('README.txt',
-    'openEarth3D export\n' +
-    '------------------\n' +
-    'Open ' + baseName + '.dae in SketchUp via File → Import.\n' +
-    'In the import dialog, set "Files of type" to "COLLADA (*.dae)".\n' +
-    'The textures/ folder must stay alongside the .dae file.\n' +
-    '\n' +
-    'Axes: Y-up (SketchUp will reorient to its Z-up convention).\n' +
-    'Units: metres.\n'
+    `openEarth3D — Wavefront OBJ export\n` +
+    `\n` +
+    `Files: ${baseName}.obj, ${baseName}.mtl, textures/*.png\n` +
+    `Most DCC tools (Blender, SketchUp, 3ds Max, Cinema 4D, Maya) will\n` +
+    `import the .obj and auto-resolve the .mtl + textures alongside it.\n` +
+    `\n` +
+    `Axes: Y-up. Units: metres.\n`
   );
 
   const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-  _triggerDownload(blob, `${baseName}.zip`);
+  _triggerDownload(blob, `${baseName}_obj.zip`);
+}
+
+// Dispatch by format name; called from app.js.
+async function exportScene(format, terrain, buildings, baseName) {
+  switch (format) {
+    case 'dae': return exportSceneAsDae(terrain, buildings, baseName);
+    case 'glb': return exportSceneAsGlb(terrain, buildings, baseName);
+    case 'obj': return exportSceneAsObj(terrain, buildings, baseName);
+    default: throw new Error('Unknown export format: ' + format);
+  }
 }
