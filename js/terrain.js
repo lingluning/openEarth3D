@@ -188,9 +188,59 @@ const PHOTO_SOURCES = {
   },
 };
 
+// ESRI returns a "Map data not yet available" placeholder PNG (HTTP 200) when
+// imagery doesn't exist at the requested zoom. The placeholder is uniform gray
+// with text; real imagery has high colour variance. Probe the centre tile and
+// step down zoom until we get real data (or hit zoom 14, where ESRI has near
+// global coverage).
+async function probeRealImagery(src, tx, ty, z) {
+  try {
+    const img = await loadTileImg(src.url(z, tx, ty));
+    if (!img) return false;
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    c.getContext('2d').drawImage(img, 0, 0, 32, 32);
+    const px = c.getContext('2d').getImageData(0, 0, 32, 32).data;
+    // Sum colour-channel deviation. Placeholder is grayscale + low variance.
+    let chrom = 0, varSum = 0, mean = 0;
+    for (let i = 0; i < 1024; i++) {
+      const r = px[i*4], g = px[i*4+1], b = px[i*4+2];
+      chrom += Math.abs(r - g) + Math.abs(g - b);
+      mean += r + g + b;
+    }
+    mean /= 3072;
+    for (let i = 0; i < 1024; i++) {
+      const lum = (px[i*4] + px[i*4+1] + px[i*4+2]) / 3;
+      varSum += (lum - mean) * (lum - mean);
+    }
+    const variance = varSum / 1024;
+    // Real aerial imagery: chrom > ~500 OR luminance variance > ~200
+    return chrom > 500 || variance > 200;
+  } catch { return false; }
+}
+
+function loadTileImg(url) {
+  return new Promise(res => {
+    const im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = () => res(im);
+    im.onerror = () => res(null);
+    im.src = url;
+  });
+}
+
 async function fetchAerialPhoto(bb, zoom, onProgress, source = 'esri') {
   const src = PHOTO_SOURCES[source] || PHOTO_SOURCES.esri;
-  const effectiveZoom = Math.min(zoom, src.maxZoom);
+  let effectiveZoom = Math.min(zoom, src.maxZoom);
+
+  // For ESRI, probe down from requested zoom until we hit real imagery.
+  if (source === 'esri') {
+    while (effectiveZoom > 14) {
+      const ctr = deg2tile((bb.n + bb.s) / 2, (bb.w + bb.e) / 2, effectiveZoom);
+      if (await probeRealImagery(src, ctr.x, ctr.y, effectiveZoom)) break;
+      effectiveZoom--;
+    }
+  }
 
   const nw = deg2tile(bb.n, bb.w, effectiveZoom);
   const se = deg2tile(bb.s, bb.e, effectiveZoom);
@@ -219,8 +269,8 @@ async function fetchAerialPhoto(bb, zoom, onProgress, source = 'esri') {
   }
 
   const bx = txMin * 256, by = tyMin * 256;
-  const xMin = lonToWorldPx(bb.w, zoom) - bx, xMax = lonToWorldPx(bb.e, zoom) - bx;
-  const yMin = latToWorldPy(bb.n, zoom) - by, yMax = latToWorldPy(bb.s, zoom) - by;
+  const xMin = lonToWorldPx(bb.w, effectiveZoom) - bx, xMax = lonToWorldPx(bb.e, effectiveZoom) - bx;
+  const yMin = latToWorldPy(bb.n, effectiveZoom) - by, yMax = latToWorldPy(bb.s, effectiveZoom) - by;
   const cx = Math.max(0, Math.round(xMin)), cy = Math.max(0, Math.round(yMin));
   const cw = Math.min(cvs.width - cx, Math.round(xMax - xMin));
   const ch = Math.min(cvs.height - cy, Math.round(yMax - yMin));
