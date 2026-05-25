@@ -112,14 +112,17 @@ function _buildRoadRibbon(coords, width, bb, elevGrid, gridN, vertExag) {
     const segLen = Math.hypot(b.x - a.x, b.z - a.z);
     const uNext = u + segLen / width; // texture repeat per road-width
 
-    positions.push(al.x, elevAt(al.x, al.z), al.z,
-                   ar.x, elevAt(ar.x, ar.z), ar.z,
-                   br.x, elevAt(br.x, br.z), br.z);
+    // Horizontal triangles: vertex order picked so the right-hand-rule
+    // normal points up (+Y), otherwise the ribbon is hidden by backface
+    // culling when viewed from above.
     positions.push(al.x, elevAt(al.x, al.z), al.z,
                    br.x, elevAt(br.x, br.z), br.z,
-                   bl.x, elevAt(bl.x, bl.z), bl.z);
-    uvs.push(0, u,  1, u,  1, uNext);
-    uvs.push(0, u,  1, uNext,  0, uNext);
+                   ar.x, elevAt(ar.x, ar.z), ar.z);
+    positions.push(al.x, elevAt(al.x, al.z), al.z,
+                   bl.x, elevAt(bl.x, bl.z), bl.z,
+                   br.x, elevAt(br.x, br.z), br.z);
+    uvs.push(0, u,  1, uNext,  1, u);
+    uvs.push(0, u,  0, uNext,  1, uNext);
     u = uNext;
   }
 

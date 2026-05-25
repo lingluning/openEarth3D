@@ -61,10 +61,19 @@ function initScene(canvas) {
   // clone shares the original sky's material (uniforms included), so updating
   // the sun position automatically propagates here too — we just need to
   // re-bake on each time-of-day change.
+  //
+  // Critical: PMREMGenerator's default near/far is 0.1/100. The main-scene
+  // sky is scaled to 450 000 (so it stays "at infinity" while the camera
+  // moves over a 3 km terrain), which would put every face well past the
+  // default far plane and leave the env map black. The clone shrinks the
+  // sky to fit inside the default frustum without affecting the displayed
+  // sky (the shader only cares about view direction, not distance).
   pmrem = new THREE.PMREMGenerator(renderer);
   pmrem.compileEquirectangularShader();
   skyOnlyScene = new THREE.Scene();
-  skyOnlyScene.add(new THREE.Mesh(sky.geometry, sky.material));
+  const envSky = new THREE.Mesh(sky.geometry, sky.material);
+  envSky.scale.setScalar(50);
+  skyOnlyScene.add(envSky);
 
   setTimeOfDay(_currentHour); // initialise sun + sky tint + env map
 

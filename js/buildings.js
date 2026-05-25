@@ -173,19 +173,26 @@ function _getRoofMat(style) {
 // ── Wall geometry — non-capped quad strip with proper UVs ──────────────────
 // ExtrudeGeometry produces walls + a flat cap; we want walls only so the
 // roof geometry can replace the cap cleanly.
+//
+// Winding note: our coordinate frame has +X east, +Y up, +Z south. After
+// ensuring `area2 >= 0`, the footprint is traversed clockwise as seen from
+// +Y, so the outward direction for each edge is the LEFT side of walking
+// — equivalently, the cross (top-bot) × (b-a) (rather than the natural
+// (b-a) × (top-bot)). We emit triangles in (a-bot, b-top, b-bot) /
+// (a-bot, a-top, b-top) order so the right-hand-rule normals point
+// outward and FrontSide culling keeps them visible.
 function _makeWallsGeo(footprint, baseY, topY) {
   const positions = [], uvs = [];
   const n = footprint.length;
   for (let i = 0; i < n; i++) {
     const a = footprint[i], b = footprint[(i + 1) % n];
     const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-    const uMax = segLen / 8;        // 8 m horizontal texture repeat
-    const vMax = (topY - baseY) / 4; // 4 m vertical
-    // two CCW triangles, outward-facing
-    positions.push(a.x, baseY, a.z,   b.x, baseY, b.z,   b.x, topY, b.z);
-    positions.push(a.x, baseY, a.z,   b.x, topY, b.z,    a.x, topY, a.z);
-    uvs.push(0, 0,  uMax, 0,  uMax, vMax);
-    uvs.push(0, 0,  uMax, vMax,  0, vMax);
+    const uMax = segLen / 8;          // 8 m horizontal texture repeat
+    const vMax = (topY - baseY) / 4;  // 4 m vertical
+    positions.push(a.x, baseY, a.z,   b.x, topY, b.z,    b.x, baseY, b.z);
+    positions.push(a.x, baseY, a.z,   a.x, topY, a.z,    b.x, topY, b.z);
+    uvs.push(0, 0,  uMax, vMax,  uMax, 0);
+    uvs.push(0, 0,  0, vMax,     uMax, vMax);
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -212,9 +219,11 @@ function _makePyramidalRoofGeo(footprint, baseY, topY) {
   const cx = footprint.reduce((s, p) => s + p.x, 0) / n;
   const cz = footprint.reduce((s, p) => s + p.z, 0) / n;
   const positions = [];
+  // Triangle order (a, apex, b) keeps the right-hand-rule normal pointing
+  // outward+up for our CW-from-+Y footprint convention.
   for (let i = 0; i < n; i++) {
     const a = footprint[i], b = footprint[(i + 1) % n];
-    positions.push(a.x, baseY, a.z,  b.x, baseY, b.z,  cx, topY, cz);
+    positions.push(a.x, baseY, a.z,  cx, topY, cz,  b.x, baseY, b.z);
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -270,16 +279,16 @@ function _makeGabledRoofGeo(footprint, baseY, topY) {
 
   // For each edge of the footprint, slope upward to whichever ridge endpoint
   // its midpoint is closer to. That gives two long sloping roof planes.
+  // Triangle vertex order is (a, apex, b) so the right-hand-rule normals
+  // point outward+up under our CW-from-+Y footprint convention.
   const positions = [];
   for (let i = 0; i < n; i++) {
     const a = footprint[i], b = footprint[(i + 1) % n];
     const mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2;
     const tMid = (mx - cx) * ax + (mz - cz) * az;
     const apex = tMid < 0 ? ridgeA : ridgeB;
-    positions.push(a.x, baseY, a.z,  b.x, baseY, b.z,  apex.x, apex.y, apex.z);
+    positions.push(a.x, baseY, a.z,  apex.x, apex.y, apex.z,  b.x, baseY, b.z);
   }
-  // Bridge the two ridge endpoints across the centre to close the seam.
-  positions.push(ridgeA.x, ridgeA.y, ridgeA.z,  ridgeB.x, ridgeB.y, ridgeB.z,  cx, topY, cz);
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
