@@ -416,6 +416,25 @@ function _makeWallsGeo(footprint, baseY, topY) {
 // All return a BufferGeometry positioned in world space — vertices already
 // at the correct (x, y, z). The mesh that wraps them sits at the identity.
 
+// True iff the footprint is convex — every consecutive triple turns the
+// same way. Non-convex polygons (L/U/T houses, courtyards, complex
+// commercial blocks) break every fan-triangulation algorithm we have
+// for pitched roofs, so we use this to demote them to flat.
+function _isConvex(pts) {
+  const n = pts.length;
+  if (n < 4) return true;
+  let sign = 0;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n], c = pts[(i + 2) % n];
+    const cross = (b.x - a.x) * (c.z - b.z) - (b.z - a.z) * (c.x - b.x);
+    if (Math.abs(cross) < 1e-6) continue;
+    const s = cross > 0 ? 1 : -1;
+    if (sign === 0) sign = s;
+    else if (s !== sign) return false;
+  }
+  return true;
+}
+
 function _makeFlatRoofGeo(footprint, y) {
   // Triangulate via THREE.Shape so non-convex footprints work too.
   const shape = new THREE.Shape(footprint.map(p => new THREE.Vector2(p.x, -p.z)));
@@ -459,52 +478,74 @@ function _makeDomeRoofGeo(footprint, baseY, topY) {
   return _addRoofUVs(sphere);
 }
 
+// Gabled roof built over the polygon's oriented bounding box, *not* its
+// raw outline. The OBB approach gives:
+//   - a clean ridge at the middle of the long axis
+//   - two long sloped trapezoids covering the full roof width
+//   - two vertical triangular gable ends
+//   - ~4 % eave overhang so the roof reads like a real overhanging roof
+// rather than a tarp shrink-wrapped to the wall. The previous "each edge
+// slopes to one ridge endpoint" trick produced asymmetric, hole-ridden
+// surfaces on any footprint that wasn't a perfect aspect-ratio rectangle.
 function _makeGabledRoofGeo(footprint, baseY, topY) {
-  // Compute principal axis of the footprint (longest edge or PCA-lite via
-  // bounding-box major axis), then ridge along that axis.
   const n = footprint.length;
   const cx = footprint.reduce((s, p) => s + p.x, 0) / n;
   const cz = footprint.reduce((s, p) => s + p.z, 0) / n;
 
-  // Pick axis as the principal direction of the OBB approximated by PCA.
+  // PCA principal axis = ridge direction.
   let sxx = 0, szz = 0, sxz = 0;
   for (const p of footprint) {
     const dx = p.x - cx, dz = p.z - cz;
     sxx += dx*dx; szz += dz*dz; sxz += dx*dz;
   }
-  // Eigenvector angle of 2D covariance matrix.
-  const theta = 0.5 * Math.atan2(2*sxz, sxx - szz);
-  const ax = Math.cos(theta), az = Math.sin(theta);   // ridge direction
-  const nx = -az,            nz = ax;                  // perpendicular
+  const theta = 0.5 * Math.atan2(2 * sxz, sxx - szz);
+  const ax = Math.cos(theta),  az = Math.sin(theta);   // along ridge
+  const nx = -az,              nz = ax;                 // perpendicular
 
-  // Project footprint onto ridge axis; ridge endpoints at extreme projections.
-  let tMin = +Infinity, tMax = -Infinity;
+  // Project footprint into (ridge, perp) frame → OBB extents.
+  let tMin = +Infinity, tMax = -Infinity, sMin = +Infinity, sMax = -Infinity;
   for (const p of footprint) {
-    const t = (p.x - cx) * ax + (p.z - cz) * az;
-    if (t < tMin) tMin = t;
-    if (t > tMax) tMax = t;
+    const dx = p.x - cx, dz = p.z - cz;
+    const t = dx * ax + dz * az;
+    const s = dx * nx + dz * nz;
+    if (t < tMin) tMin = t; if (t > tMax) tMax = t;
+    if (s < sMin) sMin = s; if (s > sMax) sMax = s;
   }
-  // Inset by 10 % so the gable ends look like real gables (vertical triangles).
-  const inset = (tMax - tMin) * 0.05;
-  tMin += inset; tMax -= inset;
-  const ridgeA = { x: cx + ax * tMin, y: topY, z: cz + az * tMin };
-  const ridgeB = { x: cx + ax * tMax, y: topY, z: cz + az * tMax };
+  // 4 % eave overhang on both axes.
+  const tEave = (tMax - tMin) * 0.04, sEave = (sMax - sMin) * 0.04;
+  tMin -= tEave; tMax += tEave;
+  sMin -= sEave; sMax += sEave;
 
-  // For each edge of the footprint, slope upward to whichever ridge endpoint
-  // its midpoint is closer to. That gives two long sloping roof planes.
-  // Triangle vertex order is (a, apex, b) so the right-hand-rule normals
-  // point outward+up under our CW-from-+Y footprint convention.
-  const positions = [];
-  for (let i = 0; i < n; i++) {
-    const a = footprint[i], b = footprint[(i + 1) % n];
-    const mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2;
-    const tMid = (mx - cx) * ax + (mz - cz) * az;
-    const apex = tMid < 0 ? ridgeA : ridgeB;
-    positions.push(a.x, baseY, a.z,  apex.x, apex.y, apex.z,  b.x, baseY, b.z);
-  }
+  const corner = (t, s) => ({
+    x: cx + ax * t + nx * s,
+    z: cz + az * t + nz * s,
+  });
+  // c1..c4 walk the OBB CW from +Y (same convention as our footprints).
+  const c1 = corner(tMin, sMin);  // NW (or "back-left" in ridge frame)
+  const c2 = corner(tMax, sMin);  // NE
+  const c3 = corner(tMax, sMax);  // SE
+  const c4 = corner(tMin, sMax);  // SW
+  // Ridge endpoints sit on the OBB midline along the perp axis.
+  const rA = { x: cx + ax * tMin, y: topY, z: cz + az * tMin };
+  const rB = { x: cx + ax * tMax, y: topY, z: cz + az * tMax };
+
+  // Winding hand-verified for our +X-east / +Y-up / +Z-south frame so the
+  // right-hand-rule normal points up + outward on every face. See the
+  // commit message for the per-triangle derivation.
+  const P = [];
+  // North slope (trapezoid c1-c2-rB-rA → two CCW-from-camera triangles)
+  P.push(c1.x, baseY, c1.z,  rB.x, rB.y, rB.z,  c2.x, baseY, c2.z);
+  P.push(c1.x, baseY, c1.z,  rA.x, rA.y, rA.z,  rB.x, rB.y, rB.z);
+  // South slope (trapezoid c3-c4-rA-rB)
+  P.push(c3.x, baseY, c3.z,  rA.x, rA.y, rA.z,  c4.x, baseY, c4.z);
+  P.push(c3.x, baseY, c3.z,  rB.x, rB.y, rB.z,  rA.x, rA.y, rA.z);
+  // West gable
+  P.push(c4.x, baseY, c4.z,  rA.x, rA.y, rA.z,  c1.x, baseY, c1.z);
+  // East gable
+  P.push(c2.x, baseY, c2.z,  rB.x, rB.y, rB.z,  c3.x, baseY, c3.z);
 
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
   geo.computeVertexNormals();
   return _addRoofUVs(geo);
 }
@@ -551,10 +592,23 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
 
   // parseBuildings has already validated and clamped these so they're safe
   // to use directly: minH < totalH, roofH ≤ totalH - minH - 2.
-  const style   = getBuildingStyle(building.tags);
-  const minH    = building.minH;
-  const totalH  = building.height;
-  const roofH   = building.roofH;
+  const style = getBuildingStyle(building.tags);
+  const minH  = building.minH;
+  const totalH = building.height;
+
+  // Fan-triangulated pitched roofs (pyramidal/gabled) need a convex
+  // footprint — on L/U/T-shaped polygons the fan triangles either leave
+  // visible holes or fold over each other, which is exactly the "roofs
+  // are partial" symptom users hit. Demote to flat here so the building
+  // still reaches its tagged height instead of standing under a half-
+  // missing roof.
+  let roofShape = building.roofShape;
+  let roofH     = building.roofH;
+  if (roofShape !== 'flat' && roofShape !== 'dome' && !_isConvex(pts2d)) {
+    roofShape = 'flat';
+    roofH = 0;
+  }
+
   const wallTop = baseElev + minH + (totalH - roofH);
   const roofTop = baseElev + minH + totalH;
   const baseY   = baseElev + minH;
@@ -566,9 +620,10 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   wallMesh.receiveShadow = true;
 
   // Roof: matches the OSM roof:shape tag (or our inference if absent).
-  // Pitched roofs get a clay-tile texture; flat roofs an asphalt membrane.
-  const pitched = building.roofShape !== 'flat' && roofH > 0.5;
-  const roofGeo = _makeRoofGeo(building.roofShape, pts2d, wallTop, roofTop);
+  // Use the locally-demoted roofShape so non-convex footprints get the
+  // flat roof + tile-vs-membrane choice we actually computed above.
+  const pitched = roofShape !== 'flat' && roofH > 0.5;
+  const roofGeo = _makeRoofGeo(roofShape, pts2d, wallTop, roofTop);
   const roofMesh = new THREE.Mesh(roofGeo, _getRoofMat(style, pitched));
   roofMesh.castShadow = true;
   roofMesh.receiveShadow = true;
