@@ -54,6 +54,7 @@ function persistInputs() {
       vertExag: document.getElementById('vertExag').value,
       photoSource: document.getElementById('photoSource').value,
       meshDetail: document.getElementById('meshDetail').value,
+      hour: document.getElementById('timeOfDay').value,
     }));
   } catch {}
 }
@@ -76,7 +77,20 @@ function restoreInputs() {
     }
     if (v.photoSource) document.getElementById('photoSource').value = v.photoSource;
     if (v.meshDetail) document.getElementById('meshDetail').value = v.meshDetail;
+    if (v.hour != null) {
+      const slider = document.getElementById('timeOfDay');
+      slider.value = v.hour;
+      updateHourLabel(v.hour);
+      if (typeof setTimeOfDay === 'function') setTimeOfDay(parseFloat(v.hour));
+    }
   } catch {}
+}
+
+function updateHourLabel(h) {
+  const v = parseFloat(h);
+  const hh = String(Math.floor(v)).padStart(2, '0');
+  const mm = String(Math.round((v - Math.floor(v)) * 60)).padStart(2, '0');
+  document.getElementById('hourLabel').textContent = `${hh}:${mm}`;
 }
 
 function setExportEnabled(enabled) {
@@ -203,6 +217,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('vertExag').addEventListener('input', function () {
     document.getElementById('exagLabel').textContent = parseFloat(this.value).toFixed(1) + 'x';
+  });
+
+  document.getElementById('timeOfDay').addEventListener('input', function () {
+    const h = parseFloat(this.value);
+    updateHourLabel(h);
+    setTimeOfDay(h);
+    persistInputs();
   });
 
   document.querySelectorAll('[data-lat]').forEach(btn => {
