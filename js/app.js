@@ -1,7 +1,8 @@
 'use strict';
 
-// 128×128 mesh using DEM PNG tiles → ~10m resolution, comparable to Google Earth
-const GRID_N     = 128;
+// Mesh density is now user-selectable (see #meshDetail); DEM zoom is
+// picked automatically inside fetchElevGridHiRes so that one DEM pixel
+// ≈ one grid cell at the chosen density.
 const PHOTO_ZOOM = 19; // ESRI supports zoom 19 (~30cm/px); GSI caps at 18 (~60cm/px)
 const LS_KEY     = 'openearth3d:lastInputs';
 
@@ -52,6 +53,7 @@ function persistInputs() {
       buildings: document.getElementById('toggleBuildings').checked,
       vertExag: document.getElementById('vertExag').value,
       photoSource: document.getElementById('photoSource').value,
+      meshDetail: document.getElementById('meshDetail').value,
     }));
   } catch {}
 }
@@ -73,6 +75,7 @@ function restoreInputs() {
       document.getElementById('exagLabel').textContent = parseFloat(v.vertExag).toFixed(1) + 'x';
     }
     if (v.photoSource) document.getElementById('photoSource').value = v.photoSource;
+    if (v.meshDetail) document.getElementById('meshDetail').value = v.meshDetail;
   } catch {}
 }
 
@@ -91,6 +94,7 @@ async function run() {
   const showBuildings = document.getElementById('toggleBuildings').checked;
   const vertExag   = parseFloat(document.getElementById('vertExag').value) || 2.0;
   const photoSrc    = document.getElementById('photoSource').value;
+  const meshN       = parseInt(document.getElementById('meshDetail').value, 10) || 128;
 
   if (isNaN(lat) || isNaN(lon)) { showError('緯度経度を入力してください'); return; }
 
@@ -105,7 +109,7 @@ async function run() {
   setProgress(0, '地形データ取得中…');
   let elevGrid;
   try {
-    elevGrid = await fetchElevGridHiRes(bb, GRID_N, (p, label) => {
+    elevGrid = await fetchElevGridHiRes(bb, meshN, (p, label) => {
       setProgress(p * 0.4, label || '地形データ取得中…');
     });
   } catch (e) {
@@ -113,7 +117,8 @@ async function run() {
     document.getElementById('runBtn').disabled = false;
     return;
   }
-  const meshN = elevGrid.length;
+  // elevGrid.length === meshN (kept here only as a sanity guard if the
+  // backend ever decides to clamp differently for tiny bboxes).
 
   // ── Step 2: aerial photo ───────────────────────────────────────────────
   setProgress(0.4, '航空写真取得中…');

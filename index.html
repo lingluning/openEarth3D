@@ -126,6 +126,15 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
           <option value="gsi">国土地理院 — zoom 18 (~60cm/px)</option>
         </select>
       </div>
+      <div style="margin-top:10px">
+        <label>メッシュ精度 <span style="color:#81d4fa;font-size:0.72rem">（高いほど詳細・重い）</span></label>
+        <select id="meshDetail" style="width:100%;margin-top:3px;background:#1a1a2e;border:1px solid #0f3460;color:#e0e0f0;padding:5px 8px;border-radius:5px;font-size:0.82rem">
+          <option value="128">標準 — 128×128（~16k vert, z14 DEM ~10m）</option>
+          <option value="192">高 — 192×192（~37k vert, z14 DEM + 補間）</option>
+          <option value="256" selected>最高 — 256×256（~65k vert, z15 DEM ~5m）✨</option>
+          <option value="384">超精細 — 384×384（~147k vert, z15 DEM + 補間）</option>
+        </select>
+      </div>
     </div>
 
     <div id="progressWrap">

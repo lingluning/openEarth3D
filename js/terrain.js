@@ -108,6 +108,43 @@ function sampleTile(arr, fx, fy) {
        + (arr[y1 * 256 + x0] * (1 - tx) + arr[y1 * 256 + x1] * tx) * ty;
 }
 
+// Catmull-Rom 1D cubic. Smoother than bilinear when the output grid is
+// denser than the DEM source; preserves curvature instead of flattening
+// the surface into long planar facets.
+function _cubic(p0, p1, p2, p3, t) {
+  const a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+  const b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+  const c = -0.5 * p0 + 0.5 * p2;
+  return ((a * t + b) * t + c) * t + p1;
+}
+
+function _readClamped(arr, x, y) {
+  const cx = Math.max(0, Math.min(255, x));
+  const cy = Math.max(0, Math.min(255, y));
+  return arr[cy * 256 + cx];
+}
+
+// Bicubic sample of a 256×256 tile. Only worth doing when the output mesh
+// is denser than DEM pixels (otherwise we're oversampling and bilinear
+// suffices).
+function sampleTileCubic(arr, fx, fy) {
+  if (!arr) return 0;
+  const x = Math.floor(fx), y = Math.floor(fy);
+  const tx = fx - x, ty = fy - y;
+  const rows = new Array(4);
+  for (let j = 0; j < 4; j++) {
+    const yy = y - 1 + j;
+    rows[j] = _cubic(
+      _readClamped(arr, x - 1, yy),
+      _readClamped(arr, x,     yy),
+      _readClamped(arr, x + 1, yy),
+      _readClamped(arr, x + 2, yy),
+      tx
+    );
+  }
+  return _cubic(rows[0], rows[1], rows[2], rows[3], ty);
+}
+
 // Terrain tile with cascade: GSI dem5a (Japan ~5m) → AWS Terrarium (global ~30m)
 // GSI 404 (sea/outside Japan) is silently handled — no console errors for missing tiles
 async function fetchDemTileCascade(z, tx, ty) {
@@ -117,11 +154,30 @@ async function fetchDemTileCascade(z, tx, ty) {
   return await fetchTerrariumTile(z, tx, ty);
 }
 
-// High-resolution terrain grid
-//   Japan:        GSI dem5a ~5m resolution
-//   Outside Japan: AWS Terrarium ~30m resolution (global, no 404 errors)
-async function fetchElevGridHiRes(bb, meshN, onProgress) {
-  const z = 14;
+// Pick the DEM XYZ zoom that gives roughly one DEM pixel per output grid
+// cell. Going higher just downloads more tiles without adding real detail
+// (oversampling), going lower wastes mesh density (interpolation noise).
+//   metersPerPixel(z, lat) ≈ 156543 · cos(lat) / 2^z
+function pickDemZoom(bb, meshN, zMax = 15, zMin = 9) {
+  const midLat = (bb.n + bb.s) / 2;
+  const cosLat = Math.cos(midLat * Math.PI / 180);
+  // Bbox width in metres at the centre latitude.
+  const widthM = (bb.e - bb.w) * (Math.PI / 180) * 6378137 * cosLat;
+  const cellM = widthM / (meshN - 1);
+  for (let z = zMax; z >= zMin; z--) {
+    const pxM = 156543.03 * cosLat / Math.pow(2, z);
+    if (pxM <= cellM) return z;     // first zoom whose pixels fit in a cell
+  }
+  return zMin;
+}
+
+// High-resolution terrain grid.
+//   Japan:         GSI dem5a (~5m, z=15) → dem (~10m, z=14)
+//   Outside Japan: AWS Terrarium (~30m, z=15)
+// `zoom` defaults to whatever fits the requested mesh density best; pass a
+// fixed value to force a particular DEM zoom level.
+async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
+  const z = zoom || pickDemZoom(bb, meshN);
   const nwF = deg2tileFrac(bb.n, bb.w, z);
   const seF = deg2tileFrac(bb.s, bb.e, z);
   const txMin = Math.floor(nwF.x), txMax = Math.floor(seF.x);
@@ -141,8 +197,18 @@ async function fetchElevGridHiRes(bb, meshN, onProgress) {
   await mapWithConcurrency(coords, 6, async ({ tx, ty }) => {
     tileMap[`${tx}_${ty}`] = await fetchDemTileCascade(z, tx, ty);
     done++;
-    onProgress && onProgress(done / total * 0.85, `地形タイル ${done}/${total} 取得中…`);
+    onProgress && onProgress(done / total * 0.85, `地形タイル z${z} ${done}/${total} 取得中…`);
   });
+
+  // Decide once whether the mesh is denser than the DEM source. If so the
+  // bilinear lattice would flatten curvature into facets — switch to a
+  // Catmull-Rom bicubic kernel that preserves smoothness.
+  const cosLat = Math.cos((bb.n + bb.s) / 2 * Math.PI / 180);
+  const widthM = (bb.e - bb.w) * (Math.PI / 180) * 6378137 * cosLat;
+  const cellM = widthM / (meshN - 1);
+  const pxM = 156543.03 * cosLat / Math.pow(2, z);
+  const useCubic = cellM < pxM * 0.9;
+  const sample = useCubic ? sampleTileCubic : sampleTile;
 
   const grid = [];
   for (let r = 0; r < meshN; r++) {
@@ -152,7 +218,7 @@ async function fetchElevGridHiRes(bb, meshN, onProgress) {
       const lon = bb.w + c * (bb.e - bb.w) / (meshN - 1);
       const frac = deg2tileFrac(lat, lon, z);
       const tx = Math.floor(frac.x), ty = Math.floor(frac.y);
-      row.push(sampleTile(tileMap[`${tx}_${ty}`], (frac.x - tx) * 256, (frac.y - ty) * 256));
+      row.push(sample(tileMap[`${tx}_${ty}`], (frac.x - tx) * 256, (frac.y - ty) * 256));
     }
     grid.push(row);
     onProgress && onProgress(0.85 + r / meshN * 0.15, '地形メッシュ生成中…');
