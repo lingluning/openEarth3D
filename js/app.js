@@ -55,6 +55,7 @@ function persistInputs() {
       photoSource: document.getElementById('photoSource').value,
       meshDetail: document.getElementById('meshDetail').value,
       hour: document.getElementById('timeOfDay').value,
+      plateau: document.getElementById('togglePlateau').checked,
     }));
   } catch {}
 }
@@ -83,6 +84,7 @@ function restoreInputs() {
       updateHourLabel(v.hour);
       if (typeof setTimeOfDay === 'function') setTimeOfDay(parseFloat(v.hour));
     }
+    if (typeof v.plateau === 'boolean') document.getElementById('togglePlateau').checked = v.plateau;
   } catch {}
 }
 
@@ -109,6 +111,7 @@ async function run() {
   const vertExag   = parseFloat(document.getElementById('vertExag').value) || 2.0;
   const photoSrc    = document.getElementById('photoSource').value;
   const meshN       = parseInt(document.getElementById('meshDetail').value, 10) || 128;
+  const usePlateau  = document.getElementById('togglePlateau').checked;
 
   if (isNaN(lat) || isNaN(lon)) { showError('緯度経度を入力してください'); return; }
 
@@ -156,13 +159,26 @@ async function run() {
   currentBuildings = null;
 
   // ── Step 4: buildings + ground features ────────────────────────────────
-  // Both OSM queries run in parallel and independently — if buildings 429
-  // out we still want roads/water/trees, and vice-versa.
+  // Two parallel paths for buildings:
+  //   - PLATEAU LOD2 (real roof shapes + textures) when the bbox is inside
+  //     a known city and the user hasn't disabled the toggle.
+  //   - OSM extrusion (worldwide fallback).
+  // Ground features (roads/water/bridges/trees) always come from OSM.
   if (showBuildings) {
-    setProgress(0.75, 'OSMデータ取得中（建物・道路・水域）…');
-    const [bRes, gRes] = await Promise.allSettled([
-      fetchBuildings(bb),
-      fetchGroundFeatures(bb),
+    setProgress(0.75, 'OSMデータ取得中（道路・水域・樹木）…');
+
+    // Kick PLATEAU lookup in parallel with OSM so we don't pay the wait
+    // serially. If PLATEAU is disabled or there's no coverage we just
+    // skip the await and use OSM buildings.
+    const plateauCity = usePlateau ? findPlateauCity(lat, lon) : null;
+    const plateauPromise = plateauCity
+      ? fetchPlateauTilesetUrl(plateauCity.code).catch(e => { console.warn('PLATEAU lookup failed:', e); return null; })
+      : Promise.resolve(null);
+
+    const [bRes, gRes, tilesetUrl] = await Promise.all([
+      Promise.allSettled([fetchBuildings(bb)]).then(r => r[0]),
+      Promise.allSettled([fetchGroundFeatures(bb)]).then(r => r[0]),
+      plateauPromise,
     ]);
     const bElems = bRes.status === 'fulfilled' ? bRes.value : [];
     const gElems = gRes.status === 'fulfilled' ? gRes.value : [];
@@ -170,8 +186,6 @@ async function run() {
     if (gRes.status === 'rejected') console.warn('地物取得失敗:', gRes.reason);
 
     try {
-      // Ground features first so buildings draw on top (they're taller and
-      // shouldn't be blocked by water transparency).
       const feats = parseGroundFeatures(gElems, bb);
       const featGroup = new THREE.Group();
       featGroup.name = 'ground-features';
@@ -181,18 +195,41 @@ async function run() {
       featGroup.add(createTrees(feats.trees, feats.forests, bb, elevGrid, meshN, vertExag));
       scene.add(featGroup);
 
-      setProgress(0.88, '建物3D生成中…');
-      const parsed = parseBuildings(bElems, bb);
-      currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag);
-      scene.add(currentBuildings);
+      // PLATEAU path
+      let usedPlateau = false;
+      if (tilesetUrl) {
+        try {
+          setProgress(0.80, `PLATEAU LOD2 (${plateauCity.name}) 読込中…`);
+          const plateauGroup = await loadPlateauBuildings(tilesetUrl, bb,
+            (p, label) => setProgress(0.80 + p * 0.15, label));
+          if (plateauGroup) {
+            scene.add(plateauGroup);
+            currentBuildings = plateauGroup;
+            usedPlateau = true;
+            setProgress(0.96, `✨ PLATEAU LOD2 ${plateauCity.name} で表示中`);
+          }
+        } catch (e) {
+          console.warn('PLATEAU load failed, falling back to OSM:', e);
+        }
+      }
 
-      const failNote = (bRes.status === 'rejected' || gRes.status === 'rejected')
-        ? ' ⚠️ 一部のOSMデータ取得失敗' : '';
-      setProgress(0.96,
-        `建物 ${parsed.length} 棟・道路 ${feats.roads.length}・橋 ${feats.bridges.length}・水域 ${feats.waters.length}・樹木 ${feats.trees.length} を生成${failNote}`
-      );
+      // OSM fallback (or primary path outside Japan)
+      if (!usedPlateau) {
+        setProgress(0.88, '建物3D生成中（OSM）…');
+        const parsed = parseBuildings(bElems, bb);
+        currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag);
+        scene.add(currentBuildings);
+        const failNote = (bRes.status === 'rejected' || gRes.status === 'rejected')
+          ? ' ⚠️ 一部のOSMデータ取得失敗' : '';
+        const plateauNote = (usePlateau && !plateauCity) ? ' (PLATEAU圏外)'
+                          : (usePlateau && plateauCity && !tilesetUrl) ? ' (PLATEAUデータ無し)'
+                          : '';
+        setProgress(0.96,
+          `建物 ${parsed.length} 棟・道路 ${feats.roads.length}・橋 ${feats.bridges.length}・水域 ${feats.waters.length}・樹木 ${feats.trees.length} を生成${plateauNote}${failNote}`
+        );
+      }
     } catch (e) {
-      console.warn('OSMジオメトリ生成失敗:', e);
+      console.warn('ジオメトリ生成失敗:', e);
     }
   }
 

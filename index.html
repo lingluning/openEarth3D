@@ -112,7 +112,11 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
       <h3>表示設定</h3>
       <div class="toggle-row">
         <input type="checkbox" id="toggleBuildings" checked/>
-        <label for="toggleBuildings" style="margin:0">建物を表示 (OSM)</label>
+        <label for="toggleBuildings" style="margin:0">建物を表示</label>
+      </div>
+      <div class="toggle-row" style="margin-top:6px">
+        <input type="checkbox" id="togglePlateau" checked/>
+        <label for="togglePlateau" style="margin:0">PLATEAU LOD2 を優先（日本のみ） ✨</label>
       </div>
       <div style="margin-top:10px">
         <label>垂直誇張 <span style="color:#81d4fa;font-size:0.75rem">（平地は2〜3倍推奨）</span></label>
@@ -213,6 +217,7 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/ColladaExporter.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/OBJExporter.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <!-- Leaflet -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <!-- JSZip for DAE+texture bundling -->
@@ -223,6 +228,7 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 <script src="js/terrain.js"></script>
 <script src="js/buildings.js"></script>
 <script src="js/features.js"></script>
+<script src="js/plateau.js"></script>
 <script src="js/export.js"></script>
 <script src="js/scene.js"></script>
 <script src="js/app.js"></script>
