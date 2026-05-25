@@ -85,26 +85,58 @@ function clearSceneObjects() {
   if (typeof resetBuildingCaches === 'function') resetBuildingCaches();
 }
 
+// Build a terrain LOD with 4 vertex-density levels. Three.js's WebGLRenderer
+// calls lod.update(camera) automatically each frame, picking the closest
+// level whose distance threshold the camera has crossed. All four levels
+// share one MeshLambertMaterial (so the aerial photo only uploads once),
+// and the full-detail mesh is stashed on userData for the DAE/GLB/OBJ
+// exporter to grab without traversing the LOD tree.
 function buildTerrain(grid, n, xSize, zSize, texDataUrl, vertExag) {
-  const geo = new THREE.PlaneGeometry(xSize, zSize, n - 1, n - 1);
-  geo.rotateX(-Math.PI / 2);
-  const pos = geo.attributes.position;
-  for (let i = 0; i < pos.count; i++) {
-    const c = i % n, r = Math.floor(i / n);
-    pos.setY(i, grid[r][c] * vertExag);
-  }
-  pos.needsUpdate = true;
-  geo.computeVertexNormals();
-
   const tex = new THREE.TextureLoader().load(texDataUrl);
   tex.encoding = THREE.sRGBEncoding;
   tex.name = 'aerial';
   const mat = new THREE.MeshLambertMaterial({ map: tex });
   mat.name = 'terrain';
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.receiveShadow = true;
-  mesh.position.set(xSize / 2, 0, zSize / 2);
-  return mesh;
+
+  // Distance thresholds scale with terrain extent so a 1 km scene and a
+  // 3 km scene degrade at similar visual densities (verts-per-screen-pixel).
+  const span = Math.max(xSize, zSize);
+  const stops = [
+    { sub: n,                       dist: 0 },          // 128×128 → full detail
+    { sub: Math.max(2, n >> 1),     dist: span * 0.4 }, // 64×64
+    { sub: Math.max(2, n >> 2),     dist: span * 1.0 }, // 32×32
+    { sub: Math.max(2, n >> 3),     dist: span * 2.0 }, // 16×16
+  ];
+
+  const lod = new THREE.LOD();
+  let fullDetail = null;
+  for (const s of stops) {
+    const mesh = new THREE.Mesh(_terrainGeo(grid, n, s.sub, xSize, zSize, vertExag), mat);
+    mesh.receiveShadow = true;
+    lod.addLevel(mesh, s.dist);
+    if (fullDetail === null) fullDetail = mesh;
+  }
+  lod.position.set(xSize / 2, 0, zSize / 2);
+  lod.userData.fullDetail = fullDetail;
+  return lod;
+}
+
+// Build one PlaneGeometry with `sub × sub` vertices, sampling the full-res
+// elevation grid by nearest neighbour. (Bilinear would be smoother but the
+// fog already masks the discrete LOD switch.)
+function _terrainGeo(grid, n, sub, xSize, zSize, vertExag) {
+  const geo = new THREE.PlaneGeometry(xSize, zSize, sub - 1, sub - 1);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const step = (n - 1) / (sub - 1);
+  for (let i = 0; i < pos.count; i++) {
+    const c = i % sub, r = (i / sub) | 0;
+    const gc = Math.round(c * step), gr = Math.round(r * step);
+    pos.setY(i, grid[gr][gc] * vertExag);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
 }
 
 function placeCameraOverTerrain(grid, n, xSize, zSize, vertExag) {

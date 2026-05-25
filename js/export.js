@@ -26,14 +26,33 @@ function _waitForTexture(tex) {
   });
 }
 
+// When terrain is a THREE.LOD, exports should always use the highest-detail
+// level — not whatever level the camera happens to be displaying right now.
+function _resolveTerrainMesh(terrain) {
+  if (terrain && terrain.isLOD) {
+    return terrain.userData.fullDetail || terrain.levels[0].object;
+  }
+  return terrain;
+}
+
 async function _buildExportRoot(terrain, buildings, name) {
   if (!terrain) throw new Error('生成された3Dシーンがありません — まず3D表示を生成してください');
-  if (terrain.material && terrain.material.map) {
-    await _waitForTexture(terrain.material.map);
+  const mesh = _resolveTerrainMesh(terrain);
+  if (mesh.material && mesh.material.map) {
+    await _waitForTexture(mesh.material.map);
   }
   const root = new THREE.Group();
   root.name = name;
-  root.add(terrain.clone());
+  // Wrap the mesh so we can apply the parent LOD's transform without
+  // mutating the original (mesh sits at identity, LOD carries the world
+  // offset). Clone the mesh so we don't yank it out of the live LOD.
+  const t = mesh.clone();
+  if (terrain.isLOD) {
+    t.position.copy(terrain.position);
+    t.quaternion.copy(terrain.quaternion);
+    t.scale.copy(terrain.scale);
+  }
+  root.add(t);
   if (buildings) root.add(buildings.clone());
   return root;
 }
