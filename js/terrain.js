@@ -222,8 +222,9 @@ async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
 // the first source that (a) has its bbox intersect ours and (b) probes
 // real (non-placeholder) imagery at a usable zoom.
 //
-// To add a new source — local drone server, municipality tiles, PLATEAU
-// ortho slice etc — just push an entry. No other code needs to change.
+// User-supplied custom sources (terrain.js sees them as an array passed
+// in from app.js) get inserted ABOVE this list, so a downloaded municipal
+// dataset or self-hosted drone server can win against the built-in fallbacks.
 const AERIAL_SOURCES = [
   {
     id:    'esri',
@@ -235,6 +236,20 @@ const AERIAL_SOURCES = [
     minZoom: 0, maxZoom: 19,
     bbox: null,                  // global
     probePlaceholder: true,      // ESRI serves a placeholder when imagery missing
+  },
+  {
+    id:    'gsi_ort',
+    name:  '国土地理院 ort',
+    label: '国土地理院 オルソ (zoom 18, ~25cm/px, 主要都市部)',
+    // GSI's "ort" service is denser than seamlessphoto in city centres —
+    // 25 cm/px is common in central Tokyo / Osaka at z=18. Coverage is
+    // patchy outside major cities, so it sits below ESRI but above
+    // seamlessphoto in priority. Mixed jpg/png extension; ort uses png.
+    url: (z, tx, ty) =>
+      `https://cyberjapandata.gsi.go.jp/xyz/ort/${z}/${tx}/${ty}.png`,
+    minZoom: 14, maxZoom: 18,
+    bbox: { s: 24, n: 46, w: 122, e: 146 },
+    probePlaceholder: false,
   },
   {
     id:    'gsi',
@@ -251,21 +266,25 @@ const AERIAL_SOURCES = [
 // Kept as a lookup index for the old "force this exact source" pathway.
 const PHOTO_SOURCES = Object.fromEntries(AERIAL_SOURCES.map(s => [s.id, s]));
 
-// Build a source on the fly from a user-supplied template containing
-// {z}/{x}/{y} placeholders. Maximum zoom is generous — custom servers
-// (drone orthos, downloaded municipal data) routinely go to 22+.
-function makeCustomAerialSource(urlTemplate) {
+// Build a source from a user-supplied spec.
+//   { name, url, minZoom, maxZoom, bbox }
+// `url` can be either a string template containing {z}/{x}/{y} or a function.
+// Missing fields fall back to safe defaults so a "just a URL" entry works.
+function makeCustomAerialSource(spec) {
+  if (typeof spec === 'string') spec = { url: spec };
+  const tpl = spec.url;
+  const urlFn = typeof tpl === 'function'
+    ? tpl
+    : (z, x, y) => tpl.replace('{z}', z).replace('{x}', x).replace('{y}', y);
   return {
-    id:    'custom',
-    name:  'カスタムソース',
-    label: 'カスタムタイルサーバ',
-    url: (z, tx, ty) => urlTemplate
-      .replace('{z}', z).replace('{x}', tx).replace('{y}', ty),
-    minZoom: 0, maxZoom: 23,
-    bbox: null,
-    // Probe to catch typos / 404 patterns instead of dropping a black
-    // texture on the terrain.
-    probePlaceholder: true,
+    id:    'custom:' + (spec.name || 'unnamed'),
+    name:  spec.name || 'カスタムソース',
+    label: spec.name || 'カスタムタイルサーバ',
+    url:   urlFn,
+    minZoom: spec.minZoom != null ? spec.minZoom : 0,
+    maxZoom: spec.maxZoom != null ? spec.maxZoom : 23,
+    bbox:    spec.bbox || null,
+    probePlaceholder: spec.probePlaceholder !== false,
   };
 }
 
@@ -325,23 +344,31 @@ async function _pickZoomForSource(src, bb, requestedZoom) {
 }
 
 // Pick the source + zoom we'll actually render with.
-//   mode = 'auto'   → walk AERIAL_SOURCES (custom inserted at top if set)
-//   mode = id      → force that exact source, still probe-degrade its zoom
-//   mode = 'custom' → use customUrl as the only source
-async function pickAerialSource(bb, requestedZoom, mode, customUrl) {
+//   mode = 'auto'   → walk user customs first, then AERIAL_SOURCES
+//   mode = id       → force that exact built-in source, still probe-degrade
+//   mode = 'custom' → walk user customs only (no built-in fallback)
+// `customs` is an array of spec objects (see makeCustomAerialSource).
+async function pickAerialSource(bb, requestedZoom, mode, customs) {
+  const cs = Array.isArray(customs) ? customs : (customs ? [customs] : []);
+  const customSources = cs.map(makeCustomAerialSource);
+
   if (mode === 'custom') {
-    if (!customUrl) throw new Error('カスタム URL が未指定');
-    return _pickZoomForSource(makeCustomAerialSource(customUrl), bb, requestedZoom);
+    if (customSources.length === 0) throw new Error('カスタムソースが未設定');
+    for (const src of customSources) {
+      if (src.bbox && !_bboxIntersects(src.bbox, bb)) continue;
+      const result = await _pickZoomForSource(src, bb, requestedZoom);
+      if (result) return result;
+    }
+    return null;
   }
   if (mode && mode !== 'auto') {
     const src = PHOTO_SOURCES[mode];
     if (!src) throw new Error(`unknown aerial source: ${mode}`);
     return _pickZoomForSource(src, bb, requestedZoom);
   }
-  // Auto pyramid — custom source (if any) gets first crack.
-  const list = customUrl
-    ? [makeCustomAerialSource(customUrl), ...AERIAL_SOURCES]
-    : AERIAL_SOURCES;
+  // Auto: user customs first (highest priority — typically highest precision),
+  // then built-in fallbacks.
+  const list = [...customSources, ...AERIAL_SOURCES];
   for (const src of list) {
     if (src.bbox && !_bboxIntersects(src.bbox, bb)) continue;
     const result = await _pickZoomForSource(src, bb, requestedZoom);
@@ -361,14 +388,15 @@ async function loadTileImg(url) {
 }
 
 // Composite an aerial photo for the bbox. `opts` accepts either a legacy
-// string (the source id) or an object { mode, customUrl } for the new
-// pyramid path.
+// string (the source id) or an object { mode, customs } where `customs`
+// is an array of {name, url, minZoom, maxZoom, bbox} source specs.
 async function fetchAerialPhoto(bb, requestedZoom, onProgress, opts) {
   const o = typeof opts === 'string' ? { mode: opts } : (opts || {});
   const mode = o.mode || 'auto';
-  const customUrl = o.customUrl || null;
+  // Accept either `customs` (array) or legacy `customUrl` (string).
+  const customs = o.customs || (o.customUrl ? [{ url: o.customUrl }] : []);
 
-  const chosen = await pickAerialSource(bb, requestedZoom, mode, customUrl);
+  const chosen = await pickAerialSource(bb, requestedZoom, mode, customs);
   if (!chosen) throw new Error('利用可能な航空写真ソースが見つかりません');
 
   const src = chosen.src;

@@ -126,13 +126,25 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
       <div style="margin-top:10px">
         <label>航空写真ソース</label>
         <select id="photoSource" style="width:100%;margin-top:3px;background:#1a1a2e;border:1px solid #0f3460;color:#e0e0f0;padding:5px 8px;border-radius:5px;font-size:0.82rem">
-          <option value="auto" selected>自動（多源ピラミッド）✨</option>
-          <option value="esri">ESRI World Imagery 強制 (zoom 19, ~30cm/px)</option>
-          <option value="gsi">国土地理院 強制 (zoom 18, ~60cm/px)</option>
-          <option value="custom">カスタムタイルサーバ</option>
+          <option value="auto" selected>自動（カスタム → ESRI → GSI ort → GSI seamless）✨</option>
+          <option value="esri">ESRI World Imagery 強制</option>
+          <option value="gsi_ort">国土地理院 ort 強制 (~25cm)</option>
+          <option value="gsi">国土地理院 seamless 強制 (~60cm)</option>
+          <option value="custom">カスタムソースのみ</option>
         </select>
-        <input type="text" id="customAerialUrl" placeholder="https://your.server/{z}/{x}/{y}.jpg"
-               style="display:none;width:100%;margin-top:4px;background:#1a1a2e;border:1px solid #4fc3f7;color:#e0e0f0;padding:5px 8px;border-radius:5px;font-size:0.78rem;font-family:monospace"/>
+        <details style="margin-top:6px">
+          <summary style="font-size:0.74rem;color:#4fc3f7;cursor:pointer;outline:none;user-select:none">カスタムソース設定（JSON）</summary>
+          <textarea id="customAerialJson" rows="7"
+                    placeholder='[{"name":"My Drone","url":"https://srv/{z}/{x}/{y}.jpg","minZoom":16,"maxZoom":22,"bbox":{"s":35.6,"n":35.7,"w":139.7,"e":139.8}}]'
+                    style="width:100%;margin-top:4px;background:#0d0d1a;border:1px solid #4fc3f7;color:#e0e0f0;padding:6px;border-radius:5px;font-size:0.72rem;font-family:'Consolas','Menlo',monospace;resize:vertical"></textarea>
+          <div style="display:flex;gap:4px;margin-top:4px">
+            <button id="presetSourceBtn" type="button"
+                    style="flex:1;background:#0f3460;border:1px solid #4fc3f7;color:#4fc3f7;padding:5px;border-radius:4px;font-size:0.72rem;cursor:pointer">📋 テンプレ挿入</button>
+            <button id="clearSourceBtn" type="button"
+                    style="background:#1a1a2e;border:1px solid #555;color:#999;padding:5px 10px;border-radius:4px;font-size:0.72rem;cursor:pointer">クリア</button>
+          </div>
+          <div id="customAerialStatus" style="font-size:0.70rem;color:#90caf9;margin-top:3px;min-height:14px"></div>
+        </details>
       </div>
       <div style="margin-top:10px">
         <label>メッシュ精度 <span style="color:#81d4fa;font-size:0.72rem">（高いほど詳細・重い）</span></label>

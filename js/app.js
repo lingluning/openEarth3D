@@ -56,7 +56,7 @@ function persistInputs() {
       buildings: document.getElementById('toggleBuildings').checked,
       vertExag: document.getElementById('vertExag').value,
       photoSource: document.getElementById('photoSource').value,
-      customAerialUrl: document.getElementById('customAerialUrl').value,
+      customAerialJson: document.getElementById('customAerialJson').value,
       meshDetail: document.getElementById('meshDetail').value,
       hour: document.getElementById('timeOfDay').value,
       plateau: document.getElementById('togglePlateau').checked,
@@ -80,13 +80,11 @@ function restoreInputs() {
       document.getElementById('vertExag').value = v.vertExag;
       document.getElementById('exagLabel').textContent = parseFloat(v.vertExag).toFixed(1) + 'x';
     }
-    if (v.photoSource) {
-      document.getElementById('photoSource').value = v.photoSource;
-      // Reveal the custom-URL input if the saved mode was 'custom'.
-      document.getElementById('customAerialUrl').style.display =
-        v.photoSource === 'custom' ? 'block' : 'none';
+    if (v.photoSource) document.getElementById('photoSource').value = v.photoSource;
+    if (v.customAerialJson != null) {
+      document.getElementById('customAerialJson').value = v.customAerialJson;
+      validateCustomAerialJson();
     }
-    if (v.customAerialUrl != null) document.getElementById('customAerialUrl').value = v.customAerialUrl;
     if (v.meshDetail) document.getElementById('meshDetail').value = v.meshDetail;
     if (v.hour != null) {
       const slider = document.getElementById('timeOfDay');
@@ -105,6 +103,72 @@ function updateHourLabel(h) {
   document.getElementById('hourLabel').textContent = `${hh}:${mm}`;
 }
 
+// ── Custom aerial source JSON config ─────────────────────────────────────
+// Users can plug in self-hosted ortho servers (drone, downloaded municipal
+// GeoTIFF tiled with TileServer-GL, OpenDroneMap output, etc) by pasting
+// an array of source specs into the textarea. Each spec:
+//   { name, url, minZoom, maxZoom, bbox: {s,n,w,e} }
+// url must contain {z}/{x}/{y} placeholders. bbox is optional (omit for
+// global coverage). Single-source quick form: just paste a URL string.
+const AERIAL_PRESETS_JSON = `[
+  {
+    "name": "サンプル: 自前ドローンタイル",
+    "url": "https://your.server/path/{z}/{x}/{y}.jpg",
+    "minZoom": 18,
+    "maxZoom": 22,
+    "bbox": { "s": 35.681, "n": 35.690, "w": 139.760, "e": 139.770 }
+  },
+  {
+    "name": "サンプル: 横浜市 12.5cm（要自前ホスト）",
+    "url": "https://your.cdn/yokohama-125cm/{z}/{x}/{y}.jpg",
+    "minZoom": 16,
+    "maxZoom": 21,
+    "bbox": { "s": 35.300, "n": 35.580, "w": 139.515, "e": 139.788 }
+  }
+]`;
+
+// Parse the textarea content into an array of source specs. Returns [] on
+// any failure — fetchAerialPhoto silently falls back to built-in sources
+// instead of breaking the whole generate flow on a typo.
+function parseCustomAerialJson(text) {
+  const t = text.trim();
+  if (!t) return [];
+  // Quick "just a URL" shortcut.
+  if (/^https?:\/\//i.test(t)) return [{ url: t }];
+  try {
+    const parsed = JSON.parse(t);
+    if (!Array.isArray(parsed)) return [parsed];
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
+// Inline status under the textarea — tells the user "3 sources OK" vs.
+// "JSON parse error" without blocking the generate flow.
+function validateCustomAerialJson() {
+  const el = document.getElementById('customAerialJson');
+  const status = document.getElementById('customAerialStatus');
+  if (!el || !status) return;
+  const t = (el.value || '').trim();
+  if (!t) { status.textContent = ''; return; }
+  if (/^https?:\/\//i.test(t)) {
+    status.textContent = '✓ 単一 URL モード';
+    status.style.color = '#81d4fa';
+    return;
+  }
+  try {
+    const parsed = JSON.parse(t);
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    const valid = arr.filter(s => s && typeof s.url === 'string');
+    status.textContent = `✓ ${valid.length} ソース定義`;
+    status.style.color = '#81d4fa';
+  } catch (e) {
+    status.textContent = '⚠️ JSON 構文エラー: ' + (e.message || '').slice(0, 60);
+    status.style.color = '#ff8a8a';
+  }
+}
+
 function setExportEnabled(enabled) {
   for (const id of ['exportBtn', 'exportFormat']) {
     const el = document.getElementById(id);
@@ -120,7 +184,9 @@ async function run() {
   const showBuildings = document.getElementById('toggleBuildings').checked;
   const vertExag   = parseFloat(document.getElementById('vertExag').value) || 2.0;
   const photoSrc    = document.getElementById('photoSource').value;
-  const customAerialUrl = (document.getElementById('customAerialUrl').value || '').trim();
+  const customAerials = parseCustomAerialJson(
+    document.getElementById('customAerialJson').value || ''
+  );
   const meshN       = parseInt(document.getElementById('meshDetail').value, 10) || 128;
   const usePlateau  = document.getElementById('togglePlateau').checked;
 
@@ -154,7 +220,7 @@ async function run() {
   try {
     photoUrl = await fetchAerialPhoto(bb, PHOTO_ZOOM, (p, label) => {
       setProgress(0.4 + p * 0.3, label || '航空写真取得中…');
-    }, { mode: photoSrc, customUrl: customAerialUrl });
+    }, { mode: photoSrc, customs: customAerials });
   } catch (e) {
     showError('航空写真取得失敗: ' + e.message);
     document.getElementById('runBtn').disabled = false;
@@ -300,14 +366,19 @@ document.addEventListener('DOMContentLoaded', () => {
     persistInputs();
   });
 
-  // Show / hide the custom tile-server URL field when the source mode
-  // changes, and persist both fields immediately so reloads stick.
-  document.getElementById('photoSource').addEventListener('change', function () {
-    document.getElementById('customAerialUrl').style.display =
-      this.value === 'custom' ? 'block' : 'none';
+  document.getElementById('photoSource').addEventListener('change', persistInputs);
+  const customJsonEl = document.getElementById('customAerialJson');
+  customJsonEl.addEventListener('input', () => { validateCustomAerialJson(); persistInputs(); });
+  document.getElementById('presetSourceBtn').addEventListener('click', () => {
+    customJsonEl.value = AERIAL_PRESETS_JSON;
+    validateCustomAerialJson();
     persistInputs();
   });
-  document.getElementById('customAerialUrl').addEventListener('change', persistInputs);
+  document.getElementById('clearSourceBtn').addEventListener('click', () => {
+    customJsonEl.value = '';
+    validateCustomAerialJson();
+    persistInputs();
+  });
 
   document.querySelectorAll('[data-lat]').forEach(btn => {
     btn.addEventListener('click', () => {
