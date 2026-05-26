@@ -147,6 +147,14 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
         </details>
       </div>
       <div style="margin-top:10px">
+        <label>テクスチャ画質 <span style="color:#81d4fa;font-size:0.72rem">（航空写真の最大解像度）</span></label>
+        <select id="textureQuality" style="width:100%;margin-top:3px;background:#1a1a2e;border:1px solid #0f3460;color:#e0e0f0;padding:5px 8px;border-radius:5px;font-size:0.82rem">
+          <option value="4096">標準 — 4096px（旧 GPU 互換）</option>
+          <option value="8192" selected>高 — 8192px ✨</option>
+          <option value="16384">最高 — 16384px（GPU メモリ消費大）</option>
+        </select>
+      </div>
+      <div style="margin-top:10px">
         <label>メッシュ精度 <span style="color:#81d4fa;font-size:0.72rem">（高いほど詳細・重い）</span></label>
         <select id="meshDetail" style="width:100%;margin-top:3px;background:#1a1a2e;border:1px solid #0f3460;color:#e0e0f0;padding:5px 8px;border-radius:5px;font-size:0.82rem">
           <option value="128">標準 — 128×128（~16k vert, z14 DEM ~10m）</option>

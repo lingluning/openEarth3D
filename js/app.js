@@ -57,6 +57,7 @@ function persistInputs() {
       vertExag: document.getElementById('vertExag').value,
       photoSource: document.getElementById('photoSource').value,
       customAerialJson: document.getElementById('customAerialJson').value,
+      textureQuality: document.getElementById('textureQuality').value,
       meshDetail: document.getElementById('meshDetail').value,
       hour: document.getElementById('timeOfDay').value,
       plateau: document.getElementById('togglePlateau').checked,
@@ -85,6 +86,7 @@ function restoreInputs() {
       document.getElementById('customAerialJson').value = v.customAerialJson;
       validateCustomAerialJson();
     }
+    if (v.textureQuality) document.getElementById('textureQuality').value = v.textureQuality;
     if (v.meshDetail) document.getElementById('meshDetail').value = v.meshDetail;
     if (v.hour != null) {
       const slider = document.getElementById('timeOfDay');
@@ -216,11 +218,13 @@ async function run() {
 
   // ── Step 2: aerial photo ───────────────────────────────────────────────
   setProgress(0.4, '航空写真取得中…');
-  let photoUrl;
+  const maxTextureEdge = parseInt(
+    (document.getElementById('textureQuality') || {}).value || '8192', 10);
+  let aerialTex;
   try {
-    photoUrl = await fetchAerialPhoto(bb, PHOTO_ZOOM, (p, label) => {
+    aerialTex = await fetchAerialPhoto(bb, PHOTO_ZOOM, (p, label) => {
       setProgress(0.4 + p * 0.3, label || '航空写真取得中…');
-    }, { mode: photoSrc, customs: customAerials });
+    }, { mode: photoSrc, customs: customAerials, maxTextureEdge });
   } catch (e) {
     showError('航空写真取得失敗: ' + e.message);
     document.getElementById('runBtn').disabled = false;
@@ -230,7 +234,7 @@ async function run() {
   // ── Step 3: build 3D scene ─────────────────────────────────────────────
   setProgress(0.7, '3Dシーン構築中…');
   clearSceneObjects();
-  currentTerrain = buildTerrain(elevGrid, meshN, xSize, zSize, photoUrl, vertExag);
+  currentTerrain = buildTerrain(elevGrid, meshN, xSize, zSize, aerialTex, vertExag);
   scene.add(currentTerrain);
   placeCameraOverTerrain(elevGrid, meshN, xSize, zSize, vertExag);
   currentBuildings = null;
@@ -373,6 +377,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (el) el.addEventListener(ev, fn);
   };
   on('photoSource', 'change', persistInputs);
+  on('textureQuality', 'change', persistInputs);
   on('customAerialJson', 'input', () => { validateCustomAerialJson(); persistInputs(); });
   on('presetSourceBtn', 'click', () => {
     const el = document.getElementById('customAerialJson');

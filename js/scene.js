@@ -152,10 +152,18 @@ function clearSceneObjects() {
 // Build a terrain LOD with 4 vertex-density levels (see commit d08cde4).
 // Material is MeshLambertMaterial now — picks up the hemi gradient but
 // has no specular / no env reflections, matching the cartoon look.
-function buildTerrain(grid, n, xSize, zSize, texDataUrl, vertExag) {
-  const tex = new THREE.TextureLoader().load(texDataUrl);
-  tex.encoding = THREE.sRGBEncoding;
-  tex.name = 'aerial';
+// `aerialTex` is a THREE.Texture handed back by fetchAerialPhoto — already
+// configured with the right encoding / mipmap settings, no roundtrip
+// through a data URL.
+function buildTerrain(grid, n, xSize, zSize, aerialTex, vertExag) {
+  // Defensive: legacy path passed a data URL string. Wrap on the fly so
+  // older callers don't break.
+  let tex = aerialTex;
+  if (typeof aerialTex === 'string') {
+    tex = new THREE.TextureLoader().load(aerialTex);
+    tex.encoding = THREE.sRGBEncoding;
+    tex.name = 'aerial';
+  }
   const mat = new THREE.MeshLambertMaterial({ map: tex });
   mat.name = 'terrain';
 

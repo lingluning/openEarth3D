@@ -229,11 +229,14 @@ const AERIAL_SOURCES = [
   {
     id:    'esri',
     name:  'ESRI World Imagery',
-    label: 'ESRI World Imagery (zoom 19, ~30cm/px)',
+    label: 'ESRI World Imagery (~15–30cm/px in major cities)',
     // ESRI uses {z}/{y}/{x} order (y before x), unlike OSM/GSI.
     url: (z, tx, ty) =>
       `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${ty}/${tx}`,
-    minZoom: 0, maxZoom: 19,
+    // Bumped to 21 — ESRI has z=20-21 data in central NYC, Tokyo, London
+    // and a few other dense city centres. The probe walks down for areas
+    // that don't, so we don't pay for fake-real upscales.
+    minZoom: 0, maxZoom: 21,
     bbox: null,                  // global
     probePlaceholder: true,      // ESRI serves a placeholder when imagery missing
   },
@@ -436,13 +439,35 @@ async function fetchAerialPhoto(bb, requestedZoom, onProgress, opts) {
   const cw = Math.min(cvs.width - cx, Math.round(xMax - xMin));
   const ch = Math.min(cvs.height - cy, Math.round(yMax - yMin));
 
+  // Texture-edge cap. 4096 used to be the safe number; modern desktops
+  // and most phones now handle 8192 fine and 16384 on dedicated GPUs.
+  // Caller can override via opts.maxTextureEdge.
+  const MAX_EDGE = (o && o.maxTextureEdge) || 8192;
   const out = document.createElement('canvas');
-  // Cap at 4096 on the long edge with a single uniform scale; clamping
-  // width and height independently would squash the photo non-uniformly
-  // and the texture would no longer line up with OSM building positions.
-  const scale = Math.min(1, 4096 / Math.max(cw, ch));
+  // Cap on the long edge with a single uniform scale; clamping width
+  // and height independently would squash the photo non-uniformly and
+  // the texture would stop lining up with OSM building positions.
+  const scale = Math.min(1, MAX_EDGE / Math.max(cw, ch));
   out.width  = Math.max(1, Math.round(cw * scale));
   out.height = Math.max(1, Math.round(ch * scale));
-  out.getContext('2d').drawImage(cvs, cx, cy, cw, ch, 0, 0, out.width, out.height);
-  return out.toDataURL('image/jpeg', 0.95);
+  // Smooth resampling — the default low-quality nearest mode visibly
+  // blurs at higher cap sizes when downscaling is needed.
+  const outCtx = out.getContext('2d');
+  outCtx.imageSmoothingEnabled = true;
+  outCtx.imageSmoothingQuality = 'high';
+  outCtx.drawImage(cvs, cx, cy, cw, ch, 0, 0, out.width, out.height);
+
+  // Skip the JPEG roundtrip — round-tripping through toDataURL('image/jpeg', 0.95)
+  // re-encodes to lossy JPEG then re-decodes via TextureLoader, introducing
+  // block artifacts and a measurable softness. Returning a CanvasTexture
+  // hands the GPU the raw canvas pixels directly.
+  const tex = new THREE.CanvasTexture(out);
+  tex.encoding = THREE.sRGBEncoding;
+  tex.anisotropy = 8;            // sharper at grazing angles, free on modern GPUs
+  tex.minFilter = THREE.LinearMipMapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.name = `aerial_${src.name}_z${effectiveZoom}`;
+  tex.userData = { sourceName: src.name, zoom: effectiveZoom, width: out.width, height: out.height };
+  return tex;
 }
