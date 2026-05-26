@@ -150,17 +150,74 @@ function parseBuildings(elements, bb) {
   return buildings;
 }
 
+// ── Per-building variety ────────────────────────────────────────────────
+// Real cities don't have one wall colour per building type — they have a
+// distribution. To kill the "clone army" feel we bucket each building into
+// one of N variants by hashing its first coord; the bucket drives both an
+// HSL offset on the style colours and a seed for the facade's random
+// window pattern. Texture cache key includes the bucket so we still share
+// across buildings that fall in the same bucket.
+const STYLE_VARIANTS = 8;
+const HSL_OFFSETS = [
+  { dh:  0.000, ds:  0.00, dl:  0.00 },  // base
+  { dh:  0.020, ds:  0.04, dl:  0.06 },
+  { dh: -0.020, ds: -0.04, dl: -0.04 },
+  { dh:  0.040, ds: -0.04, dl:  0.04 },
+  { dh: -0.040, ds:  0.06, dl: -0.06 },
+  { dh:  0.012, ds: -0.08, dl:  0.10 },
+  { dh: -0.030, ds:  0.04, dl: -0.08 },
+  { dh:  0.030, ds: -0.02, dl:  0.02 },
+];
+
+function _buildingBucket(coords) {
+  const c = coords && coords[0];
+  if (!c) return 0;
+  // Hash that's stable for the same lat/lon across runs. 1e5 keeps us at
+  // sub-metre precision while staying inside Int32.
+  const s = (Math.round(c.lat * 1e5) | 0) ^
+            Math.imul((Math.round(c.lon * 1e5) | 0), 0x1f3b);
+  return (s >>> 0) % STYLE_VARIANTS;
+}
+
+function _jitterHexHSL(hex, dh, ds, dl) {
+  const c = new THREE.Color(hex);
+  const hsl = { h: 0, s: 0, l: 0 };
+  c.getHSL(hsl);
+  hsl.h = ((hsl.h + dh) % 1 + 1) % 1;
+  hsl.s = Math.max(0, Math.min(1, hsl.s + ds));
+  hsl.l = Math.max(0.05, Math.min(0.95, hsl.l + dl));
+  c.setHSL(hsl.h, hsl.s, hsl.l);
+  return c.getHex();
+}
+
+// Mulberry32 — small, fast, deterministic. We need a seeded RNG because
+// the facade canvas needs reproducible patterns per (style, bucket) so
+// the texture cache works.
+function _seededRng(seed) {
+  let s = (seed | 0) || 1;
+  return () => {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 // ── Procedural facade textures ─────────────────────────────────────────────
 const _facadeCache = {};
 
-function makeFacadeTexture(wallHex, type) {
-  const key = wallHex + '_' + type;
+function makeFacadeTexture(wallHex, type, bucket = 0) {
+  const key = `${wallHex.toString(16)}_${type}_${bucket}`;
   if (_facadeCache[key]) return _facadeCache[key];
 
   const W = 256, H = 512;
   const cvs = document.createElement('canvas');
   cvs.width = W; cvs.height = H;
   const ctx = cvs.getContext('2d');
+  // Reproducible randomness per bucket — same bucket always gives the
+  // same window-light pattern, AC unit placement, etc.
+  const rng = _seededRng(((wallHex << 4) ^ bucket * 0x9e37) >>> 0);
 
   const r = (wallHex >> 16) & 0xff;
   const g = (wallHex >> 8) & 0xff;
@@ -183,10 +240,19 @@ function makeFacadeTexture(wallHex, type) {
   const winW = stepX * (type === 'glass' ? 0.78 : 0.60);
   const winH = stepY * (type === 'glass' ? 0.72 : 0.55);
 
+  // Concrete-style buildings get an optional balcony rail on a random
+  // row — extra horizontal detail that distinguishes apartments from
+  // offices. Glass curtain-walls don't have these.
+  let balconyRow = -1;
+  if (type === 'concrete' && rng() < 0.6) {
+    balconyRow = Math.floor(rng() * (ROWS - 2)) + 1;
+  }
+
   for (let row = 0; row < ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
-      const wx = padX + col * stepX + (stepX - winW) / 2;
-      const wy = padY + row * stepY + (stepY - winH) / 2;
+      // ±2 px jitter so the grid doesn't look like graph paper.
+      const wx = padX + col * stepX + (stepX - winW) / 2 + (rng() - 0.5) * 3;
+      const wy = padY + row * stepY + (stepY - winH) / 2 + (rng() - 0.5) * 3;
       if (type === 'glass') {
         const grad = ctx.createLinearGradient(wx, wy, wx + winW, wy + winH);
         grad.addColorStop(0, 'rgba(140,210,240,0.88)');
@@ -197,7 +263,7 @@ function makeFacadeTexture(wallHex, type) {
         ctx.fillStyle = 'rgba(255,255,255,0.18)';
         ctx.fillRect(wx + 2, wy + 2, winW * 0.35, winH * 0.4);
       } else {
-        const lit = Math.random() > 0.18;
+        const lit = rng() > 0.22;
         ctx.fillStyle = lit ? 'rgba(200,228,255,0.80)' : 'rgba(22,30,50,0.86)';
         ctx.fillRect(wx, wy, winW, winH);
         if (lit) {
@@ -208,10 +274,27 @@ function makeFacadeTexture(wallHex, type) {
           ctx.lineTo(wx + winW * 0.5, wy + winH);
           ctx.stroke();
         }
+        // 5 % chance: small AC unit hanging off the side of an unlit window
+        if (!lit && rng() < 0.05) {
+          ctx.fillStyle = 'rgba(168,168,160,1.0)';
+          ctx.fillRect(wx + winW + 1, wy + winH * 0.3, 7, winH * 0.45);
+          ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+          ctx.strokeRect(wx + winW + 1, wy + winH * 0.3, 7, winH * 0.45);
+        }
       }
       ctx.strokeStyle = 'rgba(0,0,0,0.22)';
       ctx.lineWidth = 0.8;
       ctx.strokeRect(wx, wy, winW, winH);
+    }
+    // Balcony rail across the row (drawn over the windows we just painted
+    // below the rail line). Subtle horizontal dark band reads as railing.
+    if (row === balconyRow) {
+      const y = padY + row * stepY + stepY * 0.92;
+      ctx.fillStyle = 'rgba(60,45,32,0.55)';
+      ctx.fillRect(0, y, W, 2.2);
+      // Vertical balusters
+      ctx.fillStyle = 'rgba(60,45,32,0.40)';
+      for (let bx = 4; bx < W; bx += 8) ctx.fillRect(bx, y - 5, 1, 6);
     }
   }
 
@@ -359,23 +442,28 @@ function resetBuildingCaches() {
   for (const k in _roofTexCache) delete _roofTexCache[k];
 }
 
-function _getWallMat(style) {
-  const key = `${style.wall}_${style.type}`;
+function _getWallMat(style, bucket = 0) {
+  const off = HSL_OFFSETS[bucket % STYLE_VARIANTS];
+  const wallHex = _jitterHexHSL(style.wall, off.dh, off.ds, off.dl);
+  const key = `${wallHex.toString(16)}_${style.type}_${bucket}`;
   if (_matCache.wall[key]) return _matCache.wall[key];
-  const tex = makeFacadeTexture(style.wall, style.type);
+  const tex = makeFacadeTexture(wallHex, style.type, bucket);
   // Cartoon style: Lambert reads the hemi gradient but has no specular
-  // or env reflections. The style.pbr roughness/metalness no longer
-  // apply — Lambert is unconditionally matte.
+  // or env reflections.
   const mat = new THREE.MeshLambertMaterial({ map: tex });
   mat.name = `wall_${key}`;
   _matCache.wall[key] = mat;
   return mat;
 }
-function _getRoofMat(style, pitched) {
-  const key = `${style.roof}_${style.type}_${pitched ? 'p' : 'f'}`;
+function _getRoofMat(style, pitched, bucket = 0) {
+  const off = HSL_OFFSETS[bucket % STYLE_VARIANTS];
+  // Real rooftops vary less than walls — use half the wall jitter so the
+  // skyline doesn't end up with eight wildly different roof colours.
+  const roofHex = _jitterHexHSL(style.roof, off.dh * 0.5, off.ds * 0.5, off.dl * 0.5);
+  const key = `${roofHex.toString(16)}_${style.type}_${pitched ? 'p' : 'f'}_${bucket}`;
   if (_matCache.roof[key]) return _matCache.roof[key];
   const mat = new THREE.MeshLambertMaterial({
-    map: makeRoofTexture(style.roof, pitched),
+    map: makeRoofTexture(roofHex, pitched),
     // Flat roofs come from THREE.ShapeGeometry whose winding is arbitrary
     // depending on Earcut output; DoubleSide guarantees visibility.
     side: THREE.DoubleSide,
@@ -617,9 +705,15 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   const roofTop = baseElev + minH + totalH;
   const baseY   = baseElev + minH;
 
+  // Per-building variant bucket — drives the HSL jitter on wall/roof
+  // material and the random seed for the facade window pattern. Same
+  // bucket → cached material; total cache size stays ~5 styles × 2
+  // types × 8 buckets ≈ 80 entries.
+  const bucket = _buildingBucket(building.coords);
+
   // Walls: side quads only, with UVs ready for facade texture.
   const wallGeo = _makeWallsGeo(pts2d, baseY, wallTop);
-  const wallMesh = new THREE.Mesh(wallGeo, _getWallMat(style));
+  const wallMesh = new THREE.Mesh(wallGeo, _getWallMat(style, bucket));
   wallMesh.castShadow = true;
   wallMesh.receiveShadow = true;
 
@@ -628,13 +722,33 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   // flat roof + tile-vs-membrane choice we actually computed above.
   const pitched = roofShape !== 'flat' && roofH > 0.5;
   const roofGeo = _makeRoofGeo(roofShape, pts2d, wallTop, roofTop);
-  const roofMesh = new THREE.Mesh(roofGeo, _getRoofMat(style, pitched));
+  const roofMesh = new THREE.Mesh(roofGeo, _getRoofMat(style, pitched, bucket));
   roofMesh.castShadow = true;
   roofMesh.receiveShadow = true;
 
   const group = new THREE.Group();
   group.add(wallMesh);
   group.add(roofMesh);
+
+  // Parapet for tall enough flat-roofed buildings — small wall ring above
+  // the roof slab plus a thin concrete cap. Gives the silhouette the
+  // characteristic "raised lip" that flat roofs actually have in real
+  // life; without it everything just stops at the wall plane.
+  // Skip on tiny structures (sheds, small houses) where it'd look weird.
+  if (roofShape === 'flat' && totalH >= 6 && building.area >= 25) {
+    const parapetH = Math.min(1.0, 0.4 + totalH * 0.012);  // ~0.4-1.0 m
+    const parapetGeo = _makeWallsGeo(pts2d, wallTop, wallTop + parapetH);
+    const parapetMesh = new THREE.Mesh(parapetGeo, _getWallMat(style, bucket));
+    parapetMesh.castShadow = true;
+    parapetMesh.receiveShadow = true;
+    group.add(parapetMesh);
+    // Concrete cap closing the top of the parapet ring.
+    const capGeo = _makeFlatRoofGeo(pts2d, wallTop + parapetH);
+    const capMesh = new THREE.Mesh(capGeo, _getRoofMat(style, false, bucket));
+    capMesh.receiveShadow = true;
+    group.add(capMesh);
+  }
+
   return group;
 }
 
