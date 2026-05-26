@@ -183,9 +183,9 @@ async function run() {
   const km  = parseFloat(document.getElementById('rangeKm').value) || 1.0;
   const showBuildings = document.getElementById('toggleBuildings').checked;
   const vertExag   = parseFloat(document.getElementById('vertExag').value) || 2.0;
-  const photoSrc    = document.getElementById('photoSource').value;
+  const photoSrc    = (document.getElementById('photoSource') || {}).value || 'auto';
   const customAerials = parseCustomAerialJson(
-    document.getElementById('customAerialJson').value || ''
+    (document.getElementById('customAerialJson') || {}).value || ''
   );
   const meshN       = parseInt(document.getElementById('meshDetail').value, 10) || 128;
   const usePlateau  = document.getElementById('togglePlateau').checked;
@@ -366,16 +366,25 @@ document.addEventListener('DOMContentLoaded', () => {
     persistInputs();
   });
 
-  document.getElementById('photoSource').addEventListener('change', persistInputs);
-  const customJsonEl = document.getElementById('customAerialJson');
-  customJsonEl.addEventListener('input', () => { validateCustomAerialJson(); persistInputs(); });
-  document.getElementById('presetSourceBtn').addEventListener('click', () => {
-    customJsonEl.value = AERIAL_PRESETS_JSON;
+  // Defensive: skip wiring if the element isn't in the DOM. Common cause
+  // for a NullRef here is a stale browser cache loading an old index.html.
+  const on = (id, ev, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener(ev, fn);
+  };
+  on('photoSource', 'change', persistInputs);
+  on('customAerialJson', 'input', () => { validateCustomAerialJson(); persistInputs(); });
+  on('presetSourceBtn', 'click', () => {
+    const el = document.getElementById('customAerialJson');
+    if (!el) return;
+    el.value = AERIAL_PRESETS_JSON;
     validateCustomAerialJson();
     persistInputs();
   });
-  document.getElementById('clearSourceBtn').addEventListener('click', () => {
-    customJsonEl.value = '';
+  on('clearSourceBtn', 'click', () => {
+    const el = document.getElementById('customAerialJson');
+    if (!el) return;
+    el.value = '';
     validateCustomAerialJson();
     persistInputs();
   });
