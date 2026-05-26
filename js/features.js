@@ -115,23 +115,73 @@ function parseGroundFeatures(elements, bb) {
 function _toLocal(c, bb) { return { x: toLocalX(c.lon, bb), z: toLocalZ(c.lat, bb) }; }
 
 function _buildRoadRibbon(coords, width, bb, elevGrid, gridN, vertExag) {
-  const pts = coords.map(c => _toLocal(c, bb));
-  const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
-  const positions = [], uvs = [];
-  // Drop a small vertical offset above the terrain so the road doesn't
-  // z-fight with the aerial-photo texture.
-  const LIFT = 0.5;
-  const half = width / 2;
-
-  // Pre-compute outward normals at each vertex (averaged with neighbour).
+  // Drop near-coincident consecutive points up front. OSM occasionally
+  // stacks two nodes at the same coordinate (digitisation noise), which
+  // makes the bisector calc go undefined and produces visible spikes /
+  // gaps in the ribbon.
+  const raw = coords.map(c => _toLocal(c, bb));
+  const pts = raw.length ? [raw[0]] : [];
+  for (let i = 1; i < raw.length; i++) {
+    const last = pts[pts.length - 1];
+    if (Math.hypot(raw[i].x - last.x, raw[i].z - last.z) > 0.1) pts.push(raw[i]);
+  }
   const n = pts.length;
-  const normals = new Array(n);
+  if (n < 2) {
+    const empty = new THREE.BufferGeometry();
+    empty.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+    empty.setAttribute('uv',       new THREE.Float32BufferAttribute([], 2));
+    return empty;
+  }
+
+  const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
+  const half = width / 2;
+  const LIFT = 0.5;
+  // Miter length cap — beyond this multiplier of half-width the corner
+  // would spike off into the distance on near-180° hairpin turns.
+  const MITER_LIMIT = 4.0;
+  // Extend the first and last segments by half a road-width along their
+  // own direction so each ribbon's end pokes into adjacent ribbons at
+  // junctions. Cheap visual fix for OSM's "every road is a separate way
+  // even at intersections" topology — without an actual road graph join,
+  // this overlap covers the gap.
+  const ENDPOINT_EXTEND = half;
+
+  // Unit tangent of segment i→i+1.
+  const tangents = new Array(n - 1);
+  for (let i = 0; i < n - 1; i++) {
+    const dx = pts[i+1].x - pts[i].x;
+    const dz = pts[i+1].z - pts[i].z;
+    const L = Math.hypot(dx, dz);
+    tangents[i] = L > 0 ? { x: dx / L, z: dz / L } : { x: 1, z: 0 };
+  }
+  const t0 = tangents[0], tEnd = tangents[n - 2];
+
+  // Extended endpoint positions for triangle assembly (originals stay in
+  // `pts` so tangent indexing doesn't drift).
+  const p0Ext  = { x: pts[0].x   - t0.x   * ENDPOINT_EXTEND, z: pts[0].z   - t0.z   * ENDPOINT_EXTEND };
+  const pEndExt = { x: pts[n-1].x + tEnd.x * ENDPOINT_EXTEND, z: pts[n-1].z + tEnd.z * ENDPOINT_EXTEND };
+
+  // Per-vertex miter offset: direction perpendicular to the bisector of
+  // incoming + outgoing tangents, length = half_width / cos(half_angle).
+  // Using |t_in + t_out| = 2·cos(half_angle), the factor becomes 2/|b|.
+  // This is the standard "stroke miter" formula — it keeps the road's
+  // outer edge straight through corners instead of pinching inward.
+  const offsets = new Array(n);
   for (let i = 0; i < n; i++) {
-    let dx = 0, dz = 0;
-    if (i > 0)     { dx += pts[i].x - pts[i-1].x; dz += pts[i].z - pts[i-1].z; }
-    if (i < n - 1) { dx += pts[i+1].x - pts[i].x; dz += pts[i+1].z - pts[i].z; }
-    const L = Math.hypot(dx, dz) || 1;
-    normals[i] = { x: -dz / L, z: dx / L };  // 90° rotated tangent
+    const tin  = i > 0     ? tangents[i - 1] : tangents[i];
+    const tout = i < n - 1 ? tangents[i]     : tangents[i - 1];
+    const bx = tin.x + tout.x, bz = tin.z + tout.z;
+    const blen = Math.hypot(bx, bz);
+    let nx, nz, len;
+    if (blen < 1e-6) {
+      // Degenerate 180° turn — fall back to in-tangent's perpendicular.
+      nx = -tin.z; nz = tin.x; len = half;
+    } else {
+      nx = -bz / blen;
+      nz =  bx / blen;
+      len = half * Math.min(MITER_LIMIT, 2 / blen);
+    }
+    offsets[i] = { nx, nz, len };
   }
 
   function elevAt(x, z) {
@@ -139,21 +189,26 @@ function _buildRoadRibbon(coords, width, bb, elevGrid, gridN, vertExag) {
     const rz = Math.max(0, Math.min(1, z / zSize));
     return getElevAt(elevGrid, gridN, rx, rz) * vertExag + LIFT;
   }
+  function vertexAt(i) {
+    if (i === 0)     return p0Ext;
+    if (i === n - 1) return pEndExt;
+    return pts[i];
+  }
 
+  const positions = [], uvs = [];
   let u = 0;
   for (let i = 0; i < n - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    const na = normals[i], nb = normals[i + 1];
-    const al = { x: a.x + na.x * half, z: a.z + na.z * half };
-    const ar = { x: a.x - na.x * half, z: a.z - na.z * half };
-    const bl = { x: b.x + nb.x * half, z: b.z + nb.z * half };
-    const br = { x: b.x - nb.x * half, z: b.z - nb.z * half };
+    const a = vertexAt(i), b = vertexAt(i + 1);
+    const oa = offsets[i], ob = offsets[i + 1];
+    const al = { x: a.x + oa.nx * oa.len, z: a.z + oa.nz * oa.len };
+    const ar = { x: a.x - oa.nx * oa.len, z: a.z - oa.nz * oa.len };
+    const bl = { x: b.x + ob.nx * ob.len, z: b.z + ob.nz * ob.len };
+    const br = { x: b.x - ob.nx * ob.len, z: b.z - ob.nz * ob.len };
     const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-    const uNext = u + segLen / width; // texture repeat per road-width
+    const uNext = u + segLen / width;  // texture repeat per road-width
 
-    // Horizontal triangles: vertex order picked so the right-hand-rule
-    // normal points up (+Y), otherwise the ribbon is hidden by backface
-    // culling when viewed from above.
+    // Horizontal triangles wound CCW from +Y so the up-pointing normal
+    // survives backface culling.
     positions.push(al.x, elevAt(al.x, al.z), al.z,
                    br.x, elevAt(br.x, br.z), br.z,
                    ar.x, elevAt(ar.x, ar.z), ar.z);
