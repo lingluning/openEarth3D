@@ -194,10 +194,8 @@ function createRoads(roads, bb, elevGrid, gridN, vertExag) {
     merged.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     merged.setAttribute('uv',       new THREE.Float32BufferAttribute(uvs, 2));
     merged.computeVertexNormals();
-    const mat = new THREE.MeshStandardMaterial({
+    const mat = new THREE.MeshLambertMaterial({
       color: parseInt(col, 10),
-      roughness: 0.95,
-      metalness: 0.0,
       polygonOffset: true,
       polygonOffsetFactor: -1,
     });
@@ -328,11 +326,7 @@ function createBridges(bridges, bb, elevGrid, gridN, vertExag) {
   const deckGeo = new THREE.BufferGeometry();
   deckGeo.setAttribute('position', new THREE.Float32BufferAttribute(deckPositions, 3));
   deckGeo.computeVertexNormals();
-  const deckMat = new THREE.MeshStandardMaterial({
-    color: 0x4a4a4a,
-    roughness: 0.85,
-    metalness: 0.05,
-  });
+  const deckMat = new THREE.MeshLambertMaterial({ color: 0x6a6a6a });
   deckMat.name = 'bridge_deck';
   const deckMesh = new THREE.Mesh(deckGeo, deckMat);
   deckMesh.castShadow = true;
@@ -342,10 +336,8 @@ function createBridges(bridges, bb, elevGrid, gridN, vertExag) {
   const parapetGeo = new THREE.BufferGeometry();
   parapetGeo.setAttribute('position', new THREE.Float32BufferAttribute(parapetPositions, 3));
   parapetGeo.computeVertexNormals();
-  const parapetMat = new THREE.MeshStandardMaterial({
-    color: 0xb8b4ac,
-    roughness: 0.75,
-    metalness: 0.05,
+  const parapetMat = new THREE.MeshLambertMaterial({
+    color: 0xcec8c0,
     side: THREE.DoubleSide,  // parapets thin enough that the inside reads
   });
   parapetMat.name = 'bridge_parapet';
@@ -362,10 +354,8 @@ function createWater(waters, bb, elevGrid, gridN, vertExag) {
   const group = new THREE.Group();
   group.name = 'water';
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x2a5d7d,
-    roughness: 0.1,
-    metalness: 0.3,
+  const mat = new THREE.MeshLambertMaterial({
+    color: 0x7eb4d4,            // lighter blue, illustration-friendly
     transparent: true,
     opacity: 0.85,
     side: THREE.DoubleSide,
@@ -438,17 +428,13 @@ function createTrees(treePoints, forests, bb, elevGrid, gridN, vertExag) {
   // Trunk + crown sized for a roughly 7-8 m tree at scale 1.
   const trunkGeo = new THREE.CylinderGeometry(0.25, 0.35, 2.5, 6);
   trunkGeo.translate(0, 1.25, 0);
-  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3520, roughness: 0.9 });
+  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6e4e30 });
   trunkMat.name = 'tree_trunk';
 
   const crownGeo = new THREE.ConeGeometry(2.2, 5.5, 8);
   crownGeo.translate(0, 2.5 + 2.75, 0);
-  // vertexColors so each instance can shift the crown's hue slightly.
-  const crownMat = new THREE.MeshStandardMaterial({
-    color: 0x4a8a3a,
-    roughness: 0.85,
-    vertexColors: false,
-  });
+  // setColorAt below tints individual crowns via instanceColor.
+  const crownMat = new THREE.MeshLambertMaterial({ color: 0x5a9a48 });
   crownMat.name = 'tree_crown';
 
   // Count only trees inside the bbox; we'll size the InstancedMesh tightly.

@@ -139,9 +139,12 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
           <option value="384">超精細 — 384×384（~147k vert, z15 DEM + 補間）</option>
         </select>
       </div>
-      <div style="margin-top:10px">
-        <label>時刻 <span id="hourLabel" style="color:#81d4fa;font-size:0.78rem">13:30</span></label>
-        <input type="range" id="timeOfDay" min="0" max="24" step="0.25" value="13.5" style="width:100%"/>
+      <!-- Time-of-day slider is a no-op under the SketchUp cartoon
+           lighting model. Hidden, not removed, so app.js's input handler
+           still finds the element. -->
+      <div style="display:none">
+        <label>時刻 <span id="hourLabel">13:30</span></label>
+        <input type="range" id="timeOfDay" min="0" max="24" step="0.25" value="13.5"/>
       </div>
     </div>
 

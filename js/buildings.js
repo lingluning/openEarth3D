@@ -352,14 +352,10 @@ function _getWallMat(style) {
   const key = `${style.wall}_${style.type}`;
   if (_matCache.wall[key]) return _matCache.wall[key];
   const tex = makeFacadeTexture(style.wall, style.type);
-  const mat = new THREE.MeshStandardMaterial({
-    map:       tex,
-    roughness: style.pbr.rough,
-    metalness: style.pbr.metal,
-    // 0.45 is enough for glass to read as reflective without flooding
-    // every concrete surface with sky-blue ambient.
-    envMapIntensity: style.type === 'glass' ? 0.7 : 0.35,
-  });
+  // Cartoon style: Lambert reads the hemi gradient but has no specular
+  // or env reflections. The style.pbr roughness/metalness no longer
+  // apply — Lambert is unconditionally matte.
+  const mat = new THREE.MeshLambertMaterial({ map: tex });
   mat.name = `wall_${key}`;
   _matCache.wall[key] = mat;
   return mat;
@@ -367,11 +363,8 @@ function _getWallMat(style) {
 function _getRoofMat(style, pitched) {
   const key = `${style.roof}_${style.type}_${pitched ? 'p' : 'f'}`;
   if (_matCache.roof[key]) return _matCache.roof[key];
-  const mat = new THREE.MeshStandardMaterial({
-    map:       makeRoofTexture(style.roof, pitched),
-    color:     0xffffff,         // let the texture provide the colour
-    roughness: pitched ? 0.82 : 0.88,
-    metalness: 0.0,
+  const mat = new THREE.MeshLambertMaterial({
+    map: makeRoofTexture(style.roof, pitched),
     // Flat roofs come from THREE.ShapeGeometry whose winding is arbitrary
     // depending on Earcut output; DoubleSide guarantees visibility.
     side: THREE.DoubleSide,

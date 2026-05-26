@@ -214,19 +214,29 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       // already include the orientation flip, so we just apply the tile
       // transform and let the group's ECEF→local matrix do the rest.
       leaf.transform.decompose(gltf.scene.position, gltf.scene.quaternion, gltf.scene.scale);
-      // Shadows on every mesh in the tile. PLATEAU's glb materials ship
-      // with envMapIntensity = 1.0 — paired with our sky env map that
-      // turned every concrete facade pale blue. Drop it for a neutral
-      // look that matches the OSM building tint.
+      // Cartoon-pass: PLATEAU's glb tiles ship with MeshStandardMaterial
+      // (PBR). Replace each with a MeshLambertMaterial preserving colour
+      // and texture, so the buildings get the same flat-shaded SketchUp
+      // look as our OSM extrusions instead of a separate PBR feel. The
+      // original material is disposed to free the GPU resources it held.
       gltf.scene.traverse(o => {
-        if (o.isMesh) {
-          o.castShadow = true;
-          o.receiveShadow = true;
-          const mats = Array.isArray(o.material) ? o.material : [o.material];
-          for (const m of mats) {
-            if (m && 'envMapIntensity' in m) m.envMapIntensity = 0.35;
-          }
-        }
+        if (!o.isMesh) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        const next = mats.map(m => {
+          if (!m) return m;
+          const lambert = new THREE.MeshLambertMaterial({
+            color: m.color ? m.color.clone() : new THREE.Color(0xffffff),
+            map:   m.map || null,
+            side:  m.side || THREE.FrontSide,
+            transparent: !!m.transparent,
+            opacity: m.opacity != null ? m.opacity : 1,
+          });
+          lambert.name = m.name || 'plateau';
+          // Don't dispose m.map — Lambert keeps using the same texture.
+          m.dispose();
+          return lambert;
+        });
+        o.material = Array.isArray(o.material) ? next : next[0];
       });
       group.add(gltf.scene);
     } catch (e) {
