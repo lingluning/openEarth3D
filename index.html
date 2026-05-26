@@ -126,9 +126,13 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
       <div style="margin-top:10px">
         <label>航空写真ソース</label>
         <select id="photoSource" style="width:100%;margin-top:3px;background:#1a1a2e;border:1px solid #0f3460;color:#e0e0f0;padding:5px 8px;border-radius:5px;font-size:0.82rem">
-          <option value="esri">ESRI World Imagery — zoom 19 (~30cm/px) ✨</option>
-          <option value="gsi">国土地理院 — zoom 18 (~60cm/px)</option>
+          <option value="auto" selected>自動（多源ピラミッド）✨</option>
+          <option value="esri">ESRI World Imagery 強制 (zoom 19, ~30cm/px)</option>
+          <option value="gsi">国土地理院 強制 (zoom 18, ~60cm/px)</option>
+          <option value="custom">カスタムタイルサーバ</option>
         </select>
+        <input type="text" id="customAerialUrl" placeholder="https://your.server/{z}/{x}/{y}.jpg"
+               style="display:none;width:100%;margin-top:4px;background:#1a1a2e;border:1px solid #4fc3f7;color:#e0e0f0;padding:5px 8px;border-radius:5px;font-size:0.78rem;font-family:monospace"/>
       </div>
       <div style="margin-top:10px">
         <label>メッシュ精度 <span style="color:#81d4fa;font-size:0.72rem">（高いほど詳細・重い）</span></label>

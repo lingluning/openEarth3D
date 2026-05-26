@@ -217,27 +217,66 @@ async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
 }
 
 
-// Photo tile sources
-const PHOTO_SOURCES = {
-  esri: {
-    // ESRI World Imagery: zoom up to 19-21, ~15-30cm/px in cities, no key needed
-    // NOTE: ESRI uses {z}/{y}/{x} order (y before x), unlike OSM/GSI
-    url: (z, tx, ty) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${ty}/${tx}`,
-    maxZoom: 19,
+// ── Aerial photo sources — multi-source pyramid ────────────────────────
+// Ordered by priority. fetchAerialPhoto walks this in 'auto' mode, picks
+// the first source that (a) has its bbox intersect ours and (b) probes
+// real (non-placeholder) imagery at a usable zoom.
+//
+// To add a new source — local drone server, municipality tiles, PLATEAU
+// ortho slice etc — just push an entry. No other code needs to change.
+const AERIAL_SOURCES = [
+  {
+    id:    'esri',
+    name:  'ESRI World Imagery',
     label: 'ESRI World Imagery (zoom 19, ~30cm/px)',
+    // ESRI uses {z}/{y}/{x} order (y before x), unlike OSM/GSI.
+    url: (z, tx, ty) =>
+      `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${ty}/${tx}`,
+    minZoom: 0, maxZoom: 19,
+    bbox: null,                  // global
+    probePlaceholder: true,      // ESRI serves a placeholder when imagery missing
   },
-  gsi: {
-    url: (z, tx, ty) => `https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/${z}/${tx}/${ty}.jpg`,
-    maxZoom: 18,
+  {
+    id:    'gsi',
+    name:  '国土地理院シームレス写真',
     label: '国土地理院シームレス写真 (zoom 18, ~60cm/px)',
+    url: (z, tx, ty) =>
+      `https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/${z}/${tx}/${ty}.jpg`,
+    minZoom: 0, maxZoom: 18,
+    bbox: { s: 24, n: 46, w: 122, e: 146 },  // Japan rough bbox
+    probePlaceholder: false,
   },
-};
+];
+
+// Kept as a lookup index for the old "force this exact source" pathway.
+const PHOTO_SOURCES = Object.fromEntries(AERIAL_SOURCES.map(s => [s.id, s]));
+
+// Build a source on the fly from a user-supplied template containing
+// {z}/{x}/{y} placeholders. Maximum zoom is generous — custom servers
+// (drone orthos, downloaded municipal data) routinely go to 22+.
+function makeCustomAerialSource(urlTemplate) {
+  return {
+    id:    'custom',
+    name:  'カスタムソース',
+    label: 'カスタムタイルサーバ',
+    url: (z, tx, ty) => urlTemplate
+      .replace('{z}', z).replace('{x}', tx).replace('{y}', ty),
+    minZoom: 0, maxZoom: 23,
+    bbox: null,
+    // Probe to catch typos / 404 patterns instead of dropping a black
+    // texture on the terrain.
+    probePlaceholder: true,
+  };
+}
+
+function _bboxIntersects(a, b) {
+  return a && !(a.e < b.w || a.w > b.e || a.n < b.s || a.s > b.n);
+}
 
 // ESRI returns a "Map data not yet available" placeholder PNG (HTTP 200) when
 // imagery doesn't exist at the requested zoom. The placeholder is uniform gray
-// with text; real imagery has high colour variance. Probe the centre tile and
-// step down zoom until we get real data (or hit zoom 14, where ESRI has near
-// global coverage).
+// with text; real imagery has high colour variance. We use the same chroma+
+// variance check for any source whose `probePlaceholder` flag is set.
 async function probeRealImagery(src, tx, ty, z) {
   try {
     const img = await loadTileImg(src.url(z, tx, ty));
@@ -247,7 +286,6 @@ async function probeRealImagery(src, tx, ty, z) {
     c.getContext('2d').drawImage(img, 0, 0, 32, 32);
     img.close && img.close();
     const px = c.getContext('2d').getImageData(0, 0, 32, 32).data;
-    // Sum colour-channel deviation. Placeholder is grayscale + low variance.
     let chrom = 0, varSum = 0, mean = 0;
     for (let i = 0; i < 1024; i++) {
       const r = px[i*4], g = px[i*4+1], b = px[i*4+2];
@@ -260,9 +298,56 @@ async function probeRealImagery(src, tx, ty, z) {
       varSum += (lum - mean) * (lum - mean);
     }
     const variance = varSum / 1024;
-    // Real aerial imagery: chrom > ~500 OR luminance variance > ~200
     return chrom > 500 || variance > 200;
   } catch { return false; }
+}
+
+// Walk a single source from `requestedZoom` down to its minimum, returning
+// the highest zoom whose centre tile is real imagery. Used by both forced
+// and auto modes.
+async function _pickZoomForSource(src, bb, requestedZoom) {
+  let z = Math.min(requestedZoom, src.maxZoom);
+  if (z < src.minZoom) return null;
+  const lat = (bb.n + bb.s) / 2, lon = (bb.w + bb.e) / 2;
+  const ZOOM_FLOOR = Math.max(14, src.minZoom);  // give up below this
+  while (z >= ZOOM_FLOOR) {
+    const ctr = deg2tile(lat, lon, z);
+    if (src.probePlaceholder) {
+      if (await probeRealImagery(src, ctr.x, ctr.y, z)) return { src, zoom: z };
+    } else {
+      // Cheaper path: just check the tile loads at all (HTTP 200 + decodable).
+      const img = await loadTileImg(src.url(z, ctr.x, ctr.y));
+      if (img) { img.close && img.close(); return { src, zoom: z }; }
+    }
+    z--;
+  }
+  return null;
+}
+
+// Pick the source + zoom we'll actually render with.
+//   mode = 'auto'   → walk AERIAL_SOURCES (custom inserted at top if set)
+//   mode = id      → force that exact source, still probe-degrade its zoom
+//   mode = 'custom' → use customUrl as the only source
+async function pickAerialSource(bb, requestedZoom, mode, customUrl) {
+  if (mode === 'custom') {
+    if (!customUrl) throw new Error('カスタム URL が未指定');
+    return _pickZoomForSource(makeCustomAerialSource(customUrl), bb, requestedZoom);
+  }
+  if (mode && mode !== 'auto') {
+    const src = PHOTO_SOURCES[mode];
+    if (!src) throw new Error(`unknown aerial source: ${mode}`);
+    return _pickZoomForSource(src, bb, requestedZoom);
+  }
+  // Auto pyramid — custom source (if any) gets first crack.
+  const list = customUrl
+    ? [makeCustomAerialSource(customUrl), ...AERIAL_SOURCES]
+    : AERIAL_SOURCES;
+  for (const src of list) {
+    if (src.bbox && !_bboxIntersects(src.bbox, bb)) continue;
+    const result = await _pickZoomForSource(src, bb, requestedZoom);
+    if (result) return result;
+  }
+  return null;
 }
 
 // Fetch an image tile through the cache and decode to an ImageBitmap.
@@ -275,18 +360,20 @@ async function loadTileImg(url) {
   } catch { return null; }
 }
 
-async function fetchAerialPhoto(bb, zoom, onProgress, source = 'esri') {
-  const src = PHOTO_SOURCES[source] || PHOTO_SOURCES.esri;
-  let effectiveZoom = Math.min(zoom, src.maxZoom);
+// Composite an aerial photo for the bbox. `opts` accepts either a legacy
+// string (the source id) or an object { mode, customUrl } for the new
+// pyramid path.
+async function fetchAerialPhoto(bb, requestedZoom, onProgress, opts) {
+  const o = typeof opts === 'string' ? { mode: opts } : (opts || {});
+  const mode = o.mode || 'auto';
+  const customUrl = o.customUrl || null;
 
-  // For ESRI, probe down from requested zoom until we hit real imagery.
-  if (source === 'esri') {
-    while (effectiveZoom > 14) {
-      const ctr = deg2tile((bb.n + bb.s) / 2, (bb.w + bb.e) / 2, effectiveZoom);
-      if (await probeRealImagery(src, ctr.x, ctr.y, effectiveZoom)) break;
-      effectiveZoom--;
-    }
-  }
+  const chosen = await pickAerialSource(bb, requestedZoom, mode, customUrl);
+  if (!chosen) throw new Error('利用可能な航空写真ソースが見つかりません');
+
+  const src = chosen.src;
+  const effectiveZoom = chosen.zoom;
+  onProgress && onProgress(0, `航空写真: ${src.name} z${effectiveZoom} 取得中…`);
 
   const nw = deg2tile(bb.n, bb.w, effectiveZoom);
   const se = deg2tile(bb.s, bb.e, effectiveZoom);
@@ -311,7 +398,7 @@ async function fetchAerialPhoto(bb, zoom, onProgress, source = 'esri') {
       img.close && img.close();
     }
     done++;
-    onProgress && onProgress(done / tot, `航空写真タイル ${done}/${tot} 取得中…`);
+    onProgress && onProgress(done / tot, `航空写真 ${src.name} z${effectiveZoom}: ${done}/${tot}`);
   });
 
   const bx = txMin * 256, by = tyMin * 256;

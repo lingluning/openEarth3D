@@ -3,7 +3,10 @@
 // Mesh density is now user-selectable (see #meshDetail); DEM zoom is
 // picked automatically inside fetchElevGridHiRes so that one DEM pixel
 // ≈ one grid cell at the chosen density.
-const PHOTO_ZOOM = 19; // ESRI supports zoom 19 (~30cm/px); GSI caps at 18 (~60cm/px)
+// PHOTO_ZOOM is the *desired* upper bound — fetchAerialPhoto walks the
+// multi-source pyramid (terrain.js) and probes down per source. Custom
+// drone/municipal tile servers can take advantage of the higher cap.
+const PHOTO_ZOOM = 22;
 const LS_KEY     = 'openearth3d:lastInputs';
 
 let leafletMap, leafletMarker;
@@ -53,6 +56,7 @@ function persistInputs() {
       buildings: document.getElementById('toggleBuildings').checked,
       vertExag: document.getElementById('vertExag').value,
       photoSource: document.getElementById('photoSource').value,
+      customAerialUrl: document.getElementById('customAerialUrl').value,
       meshDetail: document.getElementById('meshDetail').value,
       hour: document.getElementById('timeOfDay').value,
       plateau: document.getElementById('togglePlateau').checked,
@@ -76,7 +80,13 @@ function restoreInputs() {
       document.getElementById('vertExag').value = v.vertExag;
       document.getElementById('exagLabel').textContent = parseFloat(v.vertExag).toFixed(1) + 'x';
     }
-    if (v.photoSource) document.getElementById('photoSource').value = v.photoSource;
+    if (v.photoSource) {
+      document.getElementById('photoSource').value = v.photoSource;
+      // Reveal the custom-URL input if the saved mode was 'custom'.
+      document.getElementById('customAerialUrl').style.display =
+        v.photoSource === 'custom' ? 'block' : 'none';
+    }
+    if (v.customAerialUrl != null) document.getElementById('customAerialUrl').value = v.customAerialUrl;
     if (v.meshDetail) document.getElementById('meshDetail').value = v.meshDetail;
     if (v.hour != null) {
       const slider = document.getElementById('timeOfDay');
@@ -110,6 +120,7 @@ async function run() {
   const showBuildings = document.getElementById('toggleBuildings').checked;
   const vertExag   = parseFloat(document.getElementById('vertExag').value) || 2.0;
   const photoSrc    = document.getElementById('photoSource').value;
+  const customAerialUrl = (document.getElementById('customAerialUrl').value || '').trim();
   const meshN       = parseInt(document.getElementById('meshDetail').value, 10) || 128;
   const usePlateau  = document.getElementById('togglePlateau').checked;
 
@@ -143,7 +154,7 @@ async function run() {
   try {
     photoUrl = await fetchAerialPhoto(bb, PHOTO_ZOOM, (p, label) => {
       setProgress(0.4 + p * 0.3, label || '航空写真取得中…');
-    }, photoSrc);
+    }, { mode: photoSrc, customUrl: customAerialUrl });
   } catch (e) {
     showError('航空写真取得失敗: ' + e.message);
     document.getElementById('runBtn').disabled = false;
@@ -288,6 +299,15 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeOfDay(h);
     persistInputs();
   });
+
+  // Show / hide the custom tile-server URL field when the source mode
+  // changes, and persist both fields immediately so reloads stick.
+  document.getElementById('photoSource').addEventListener('change', function () {
+    document.getElementById('customAerialUrl').style.display =
+      this.value === 'custom' ? 'block' : 'none';
+    persistInputs();
+  });
+  document.getElementById('customAerialUrl').addEventListener('change', persistInputs);
 
   document.querySelectorAll('[data-lat]').forEach(btn => {
     btn.addEventListener('click', () => {
