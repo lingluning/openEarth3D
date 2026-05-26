@@ -226,16 +226,19 @@ function makeFacadeTexture(wallHex, type) {
 function getBuildingStyle(tags) {
   const t = (tags.building || '').toLowerCase();
   const mat = (tags['building:material'] || '').toLowerCase();
-  // Glassy / commercial
+  // Cartoon-friendly palette — roofs significantly brighter than before
+  // because the old photoreal roof colours went near-black under the
+  // SketchUp ambient+hemi rig. pbr.* is kept for back-compat but
+  // MeshLambertMaterial ignores it.
   if (mat === 'glass' || ['commercial','retail','office','civic','public'].includes(t))
-    return { wall: 0x8ab8cc, roof: 0x3a6070, type: 'glass',    pbr: { rough: 0.15, metal: 0.55 } };
+    return { wall: 0x9ac2d4, roof: 0x809ab0, type: 'glass',    pbr: { rough: 0.15, metal: 0.55 } };
   if (mat === 'metal' || ['industrial','warehouse','factory'].includes(t))
-    return { wall: 0xa8a8a0, roof: 0x505048, type: 'concrete', pbr: { rough: 0.45, metal: 0.55 } };
+    return { wall: 0xb4b4ac, roof: 0x9a9a92, type: 'concrete', pbr: { rough: 0.45, metal: 0.55 } };
   if (mat === 'wood'  || ['church','cathedral','temple','shrine'].includes(t))
-    return { wall: 0xe0cc80, roof: 0x5a4a20, type: 'concrete', pbr: { rough: 0.75, metal: 0.0  } };
+    return { wall: 0xe8d490, roof: 0xa8884a, type: 'concrete', pbr: { rough: 0.75, metal: 0.0  } };
   if (['residential','house','apartments','dormitory'].includes(t))
-    return { wall: 0xd8b87a, roof: 0x6e4e28, type: 'concrete', pbr: { rough: 0.85, metal: 0.0  } };
-  return { wall: 0xc8c0b4, roof: 0x585048, type: 'concrete', pbr: { rough: 0.85, metal: 0.0 } };
+    return { wall: 0xe4c890, roof: 0xc06840, type: 'concrete', pbr: { rough: 0.85, metal: 0.0  } };  // terracotta
+  return { wall: 0xd4ccc0, roof: 0x9a8a78, type: 'concrete', pbr: { rough: 0.85, metal: 0.0 } };
 }
 
 // ── Procedural roof textures ──────────────────────────────────────────────
@@ -261,8 +264,11 @@ function makeRoofTexture(baseHex, pitched) {
   const baseRGB = (k=1) => `rgb(${(br*k)|0},${(bg*k)|0},${(bb*k)|0})`;
 
   if (pitched) {
-    // Mortar / shadow background a bit darker than the base.
-    ctx.fillStyle = baseRGB(0.55);
+    // Mortar / shadow background — kept a bit darker than the base, but
+    // not so dark that it dominates a flat-shaded view. Old value 0.55
+    // produced near-black gaps that read as solid black under cartoon
+    // lighting.
+    ctx.fillStyle = baseRGB(0.78);
     ctx.fillRect(0, 0, W, H);
 
     // Overlapping rows of curved clay tiles. Rows offset every other row.
@@ -272,7 +278,9 @@ function makeRoofTexture(baseHex, pitched) {
       const offX = (row & 1) ? tileW / 2 : 0;
       for (let col = -1; col * tileW + offX < W; col++) {
         const x = col * tileW + offX;
-        const v = 0.75 + Math.random() * 0.4;
+        // 0.90 .. 1.30 around base — guarantees tiles are at least as
+        // bright as the base colour even after random variation.
+        const v = 0.90 + Math.random() * 0.40;
         // Tile body: rounded "shield" top + rectangle base.
         ctx.fillStyle = baseRGB(v);
         ctx.beginPath();
@@ -288,8 +296,9 @@ function makeRoofTexture(baseHex, pitched) {
         ctx.beginPath();
         ctx.arc(x + tileW * 0.5, y + tileH * 0.55, tileW * 0.5 - 0.8, Math.PI, 0, false);
         ctx.stroke();
-        // Bottom shadow line — separates rows.
-        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        // Bottom shadow line — separates rows. Lighter than before so
+        // the grid doesn't read as dark stripes on bright tiles.
+        ctx.strokeStyle = 'rgba(0,0,0,0.28)';
         ctx.beginPath();
         ctx.moveTo(x - 0.5, y + tileH);
         ctx.lineTo(x + tileW + 0.5, y + tileH);
@@ -298,17 +307,19 @@ function makeRoofTexture(baseHex, pitched) {
     }
   } else {
     // Asphalt-membrane base + noise + faint seams every 1 m (= 64 px).
-    ctx.fillStyle = baseRGB(0.85);
+    // Brightened from 0.85 to 0.96 so flat roofs don't read as a dark
+    // smudge from above.
+    ctx.fillStyle = baseRGB(0.96);
     ctx.fillRect(0, 0, W, H);
     const img = ctx.getImageData(0, 0, W, H);
     for (let i = 0; i < img.data.length; i += 4) {
-      const n = (Math.random() - 0.5) * 28;
+      const n = (Math.random() - 0.5) * 22;
       img.data[i]   = Math.max(0, Math.min(255, img.data[i]   + n));
       img.data[i+1] = Math.max(0, Math.min(255, img.data[i+1] + n));
       img.data[i+2] = Math.max(0, Math.min(255, img.data[i+2] + n));
     }
     ctx.putImageData(img, 0, 0);
-    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.strokeStyle = 'rgba(0,0,0,0.18)';
     ctx.lineWidth = 1;
     for (let s = 0; s < W; s += 64) {
       ctx.beginPath(); ctx.moveTo(s, 0); ctx.lineTo(s, H); ctx.stroke();
