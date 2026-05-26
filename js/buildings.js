@@ -306,6 +306,96 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
   return tex;
 }
 
+// ── Shopfront texture — bottom 3.5 m of commercial / mixed-use buildings ──
+// Big glass storefronts + a coloured signage band at the top. Bucket picks
+// the signage colour from a palette so the street reads as a mix of shops
+// rather than a single brand. Texture is 256 × 128 and the wall geo's
+// vRepeatM is set so one texture covers the full ground-floor height.
+const _shopfrontCache = {};
+const SIGNAGE_COLOURS = [
+  '#c8423a', '#3268c6', '#c9a23a', '#3b9c66', '#9358bc',
+  '#c87538', '#2c8aa4', '#a23a86', '#cc6262', '#3a7c40',
+];
+
+function makeShopfrontTexture(wallHex, bucket = 0) {
+  const key = `${wallHex.toString(16)}_${bucket}`;
+  if (_shopfrontCache[key]) return _shopfrontCache[key];
+
+  const W = 256, H = 128;
+  const cvs = document.createElement('canvas');
+  cvs.width = W; cvs.height = H;
+  const ctx = cvs.getContext('2d');
+  const rng = _seededRng(((wallHex << 8) ^ bucket * 0x4f1c + 17) >>> 0);
+
+  // Wall above signage (visible only as a thin strip at the very top).
+  const wr = (wallHex >> 16) & 0xff, wg = (wallHex >> 8) & 0xff, wb = wallHex & 0xff;
+  ctx.fillStyle = `rgb(${wr},${wg},${wb})`;
+  ctx.fillRect(0, 0, W, H);
+
+  // Signage band — top ~28 % of the texture. Bucket chooses one of N
+  // palette colours so neighbouring shops have different signs.
+  const signColour = SIGNAGE_COLOURS[Math.floor(rng() * SIGNAGE_COLOURS.length)];
+  ctx.fillStyle = signColour;
+  ctx.fillRect(0, 0, W, H * 0.28);
+  // Edge shadow under the signage band — visually grounds it.
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(0, H * 0.28, W, 2);
+  // Mock text marks on the signage (random dark blocks).
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  let cursor = 12 + rng() * 20;
+  while (cursor < W - 20) {
+    const charW = 6 + rng() * 12;
+    ctx.fillRect(cursor, H * 0.10, charW, H * 0.12);
+    cursor += charW + 5 + rng() * 4;
+  }
+
+  // Glass storefront panels — bottom 70 % of texture, repeated horizontally.
+  const PANELS = 4;
+  const panelW = W / PANELS;
+  const glassY = H * 0.32;
+  const glassH = H * 0.65;
+  for (let i = 0; i < PANELS; i++) {
+    const x = i * panelW;
+    const grad = ctx.createLinearGradient(x, glassY, x + panelW, glassY + glassH);
+    grad.addColorStop(0,   'rgba(80,140,180,0.92)');
+    grad.addColorStop(0.5, 'rgba(40,100,150,0.86)');
+    grad.addColorStop(1,   'rgba(20,80,130,0.92)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x + 3, glassY + 2, panelW - 6, glassH - 4);
+    // Highlight reflection.
+    ctx.fillStyle = 'rgba(255,255,255,0.20)';
+    ctx.fillRect(x + 6, glassY + 4, panelW * 0.32, glassH * 0.32);
+    // Dark frame.
+    ctx.strokeStyle = 'rgba(20,15,10,0.75)';
+    ctx.lineWidth = 1.6;
+    ctx.strokeRect(x + 3, glassY + 2, panelW - 6, glassH - 4);
+  }
+  // Ground line — paves the storefront onto the street visually.
+  ctx.fillStyle = 'rgba(40,30,20,0.6)';
+  ctx.fillRect(0, H - 3, W, 3);
+
+  const tex = new THREE.CanvasTexture(cvs);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.encoding = THREE.sRGBEncoding;
+  tex.name = 'shop_' + key;
+  _shopfrontCache[key] = tex;
+  return tex;
+}
+
+// True if the OSM `building=*` tag (or footprint size for the `yes` /
+// untagged case) suggests this building has a commercial ground floor.
+// Used to gate the storefront overlay.
+function _hasShopfront(tags, areaM2, height) {
+  const t = (tags.building || '').toLowerCase();
+  if (['commercial','retail','office','supermarket','mall','kiosk',
+       'department_store','public','civic','hotel'].includes(t)) return true;
+  if (t === 'mixed') return true;
+  // Unspecified / generic large building in a dense area — assume
+  // commercial. Filters out small houses (< 80 m²) and short structures.
+  if ((t === 'yes' || t === '') && areaM2 > 80 && height >= 6) return true;
+  return false;
+}
+
 function getBuildingStyle(tags) {
   const t = (tags.building || '').toLowerCase();
   const mat = (tags['building:material'] || '').toLowerCase();
@@ -440,6 +530,7 @@ function resetBuildingCaches() {
   _matCache = { wall: {}, roof: {} };
   for (const k in _facadeCache) delete _facadeCache[k];
   for (const k in _roofTexCache) delete _roofTexCache[k];
+  for (const k in _shopfrontCache) delete _shopfrontCache[k];
 }
 
 function _getWallMat(style, bucket = 0) {
@@ -455,6 +546,18 @@ function _getWallMat(style, bucket = 0) {
   _matCache.wall[key] = mat;
   return mat;
 }
+function _getShopfrontMat(style, bucket = 0) {
+  const off = HSL_OFFSETS[bucket % STYLE_VARIANTS];
+  const wallHex = _jitterHexHSL(style.wall, off.dh, off.ds, off.dl);
+  const key = `shop_${wallHex.toString(16)}_${bucket}`;
+  if (_matCache.wall[key]) return _matCache.wall[key];
+  const tex = makeShopfrontTexture(wallHex, bucket);
+  const mat = new THREE.MeshLambertMaterial({ map: tex });
+  mat.name = key;
+  _matCache.wall[key] = mat;
+  return mat;
+}
+
 function _getRoofMat(style, pitched, bucket = 0) {
   const off = HSL_OFFSETS[bucket % STYLE_VARIANTS];
   // Real rooftops vary less than walls — use half the wall jitter so the
@@ -484,14 +587,14 @@ function _getRoofMat(style, pitched, bucket = 0) {
 // (b-a) × (top-bot)). We emit triangles in (a-bot, b-top, b-bot) /
 // (a-bot, a-top, b-top) order so the right-hand-rule normals point
 // outward and FrontSide culling keeps them visible.
-function _makeWallsGeo(footprint, baseY, topY) {
+function _makeWallsGeo(footprint, baseY, topY, vRepeatM = 4) {
   const positions = [], uvs = [];
   const n = footprint.length;
+  const vMax = (topY - baseY) / vRepeatM;  // 4 m vertical repeat by default
   for (let i = 0; i < n; i++) {
     const a = footprint[i], b = footprint[(i + 1) % n];
     const segLen = Math.hypot(b.x - a.x, b.z - a.z);
     const uMax = segLen / 8;          // 8 m horizontal texture repeat
-    const vMax = (topY - baseY) / 4;  // 4 m vertical
     positions.push(a.x, baseY, a.z,   b.x, topY, b.z,    b.x, baseY, b.z);
     positions.push(a.x, baseY, a.z,   a.x, topY, a.z,    b.x, topY, b.z);
     uvs.push(0, 0,  uMax, vMax,  uMax, 0);
@@ -710,9 +813,31 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   // bucket → cached material; total cache size stays ~5 styles × 2
   // types × 8 buckets ≈ 80 entries.
   const bucket = _buildingBucket(building.coords);
+  const group = new THREE.Group();
 
   // Walls: side quads only, with UVs ready for facade texture.
-  const wallGeo = _makeWallsGeo(pts2d, baseY, wallTop);
+  //
+  // Commercial / mixed-use / large generic buildings get a separate
+  // ground-floor band with a shopfront texture (big glass + signage).
+  // Upper floors keep the regular facade. Threshold of 6 m total height
+  // avoids forcing storefronts on single-storey shacks where it'd look
+  // off-scale.
+  const wallH = wallTop - baseY;
+  const wantShopfront = wallH >= 6 && _hasShopfront(building.tags, building.area, totalH);
+  const groundH = wantShopfront ? Math.min(3.5, wallH * 0.25) : 0;
+  const groundTopY = baseY + groundH;
+
+  if (wantShopfront) {
+    // Ground floor — one texture height covers the full band, no repeat.
+    const groundGeo = _makeWallsGeo(pts2d, baseY, groundTopY, groundH);
+    const groundMesh = new THREE.Mesh(groundGeo, _getShopfrontMat(style, bucket));
+    groundMesh.castShadow = true;
+    groundMesh.receiveShadow = true;
+    group.add(groundMesh);
+  }
+
+  // Upper floors (or whole wall if no shopfront).
+  const wallGeo = _makeWallsGeo(pts2d, groundTopY, wallTop);
   const wallMesh = new THREE.Mesh(wallGeo, _getWallMat(style, bucket));
   wallMesh.castShadow = true;
   wallMesh.receiveShadow = true;
@@ -726,7 +851,6 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   roofMesh.castShadow = true;
   roofMesh.receiveShadow = true;
 
-  const group = new THREE.Group();
   group.add(wallMesh);
   group.add(roofMesh);
 
