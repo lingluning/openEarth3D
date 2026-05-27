@@ -682,20 +682,30 @@ function _makeDomeRoofGeo(footprint, baseY, topY) {
 // rather than a tarp shrink-wrapped to the wall. The previous "each edge
 // slopes to one ridge endpoint" trick produced asymmetric, hole-ridden
 // surfaces on any footprint that wasn't a perfect aspect-ratio rectangle.
+//
+// Ridge orientation comes from the longest edge of the footprint, not a
+// PCA fit. PCA was numerically degenerate on near-square plans (a square
+// + 1 % digitisation noise in OSM vertices flipped the principal axis by
+// nearly 90°), which gave apartment blocks a randomly rotated roof.
+// Longest-edge is deterministic, matches what a person would draw by
+// hand, and reduces to the natural axis for honest rectangles.
 function _makeGabledRoofGeo(footprint, baseY, topY) {
   const n = footprint.length;
   const cx = footprint.reduce((s, p) => s + p.x, 0) / n;
   const cz = footprint.reduce((s, p) => s + p.z, 0) / n;
 
-  // PCA principal axis = ridge direction.
-  let sxx = 0, szz = 0, sxz = 0;
-  for (const p of footprint) {
-    const dx = p.x - cx, dz = p.z - cz;
-    sxx += dx*dx; szz += dz*dz; sxz += dx*dz;
+  // Longest-edge direction = ridge axis.
+  let bestL2 = 0;
+  let dx0 = 1, dz0 = 0;
+  for (let i = 0; i < n; i++) {
+    const a = footprint[i], b = footprint[(i + 1) % n];
+    const dx = b.x - a.x, dz = b.z - a.z;
+    const L2 = dx*dx + dz*dz;
+    if (L2 > bestL2) { bestL2 = L2; dx0 = dx; dz0 = dz; }
   }
-  const theta = 0.5 * Math.atan2(2 * sxz, sxx - szz);
-  const ax = Math.cos(theta),  az = Math.sin(theta);   // along ridge
-  const nx = -az,              nz = ax;                 // perpendicular
+  const L = Math.sqrt(bestL2) || 1;
+  const ax = dx0 / L,  az = dz0 / L;   // along ridge
+  const nx = -az,      nz = ax;        // perpendicular
 
   // Project footprint into (ridge, perp) frame → OBB extents.
   let tMin = +Infinity, tMax = -Infinity, sMin = +Infinity, sMax = -Infinity;
