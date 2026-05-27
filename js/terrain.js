@@ -229,14 +229,20 @@ const AERIAL_SOURCES = [
   {
     id:    'esri',
     name:  'ESRI World Imagery',
-    label: 'ESRI World Imagery (~15–30cm/px in major cities)',
+    label: 'ESRI World Imagery (zoom 19, ~30cm/px)',
     // ESRI uses {z}/{y}/{x} order (y before x), unlike OSM/GSI.
     url: (z, tx, ty) =>
       `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${ty}/${tx}`,
-    // Bumped to 21 — ESRI has z=20-21 data in central NYC, Tokyo, London
-    // and a few other dense city centres. The probe walks down for areas
-    // that don't, so we don't pay for fake-real upscales.
-    minZoom: 0, maxZoom: 21,
+    // ESRI returns HTTP 200 even past their real data limit — at z=20+
+    // most cities get bicubic upsampled z=19 tiles that PASS our
+    // placeholder probe (variance + chroma are preserved across the
+    // upscale). The result is more tiles to download (16× per zoom
+    // step) carrying no extra information — visibly softer than just
+    // using z=19 directly. Keep the cap at the published real-data
+    // limit; users in cities that genuinely have z=20-21 ortho (NYC,
+    // London, central Tokyo for some captures) should configure those
+    // via a custom-source JSON entry instead.
+    minZoom: 0, maxZoom: 19,
     bbox: null,                  // global
     probePlaceholder: true,      // ESRI serves a placeholder when imagery missing
   },
