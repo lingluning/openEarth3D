@@ -270,6 +270,20 @@ const AERIAL_SOURCES = [
     bbox: { s: 24, n: 46, w: 122, e: 146 },  // Japan rough bbox
     probePlaceholder: false,
   },
+  {
+    // Last-resort global fallback. Sentinel-2 cloudless mosaic by EOX —
+    // free, no API key, CC BY 4.0, ~10 m/px native resolution. Useful
+    // when ESRI is blocked (corporate firewall, browser Tracking
+    // Prevention, etc) and the user is outside Japan so GSI is out too.
+    id:    's2maps',
+    name:  'Sentinel-2 cloudless (EOX)',
+    label: 'Sentinel-2 cloudless (~10m/px, 全球バックアップ)',
+    url: (z, tx, ty) =>
+      `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2023_3857/default/g/${z}/${ty}/${tx}.jpg`,
+    minZoom: 0, maxZoom: 14,
+    bbox: null,
+    probePlaceholder: false,
+  },
 ];
 
 // Kept as a lookup index for the old "force this exact source" pathway.
@@ -307,14 +321,22 @@ function _bboxIntersects(a, b) {
   return a && !(a.e < b.w || a.w > b.e || a.n < b.s || a.s > b.n);
 }
 
-// ESRI returns a "Map data not yet available" placeholder PNG (HTTP 200) when
-// imagery doesn't exist at the requested zoom. The placeholder is uniform gray
-// with text; real imagery has high colour variance. We use the same chroma+
-// variance check for any source whose `probePlaceholder` flag is set.
+// Probe a single tile and report whether it's real imagery vs a placeholder
+// vs an outright load failure. Distinguishing the three is the difference
+// between "we're outside this dataset's coverage" (placeholder) and "the
+// browser can't reach this server at all" (network) — very different
+// debugging paths for the user.
+//   { ok: true,  reason: 'ok' }          → real imagery
+//   { ok: false, reason: 'placeholder' } → tile loaded but probe rejected
+//   { ok: false, reason: 'network' }     → fetch / decode failed
+//   { ok: false, reason: 'exception' }   → drawImage / getImageData threw
 async function probeRealImagery(src, tx, ty, z) {
+  let img;
   try {
-    const img = await loadTileImg(src.url(z, tx, ty));
-    if (!img) return false;
+    img = await loadTileImg(src.url(z, tx, ty));
+  } catch { return { ok: false, reason: 'network' }; }
+  if (!img) return { ok: false, reason: 'network' };
+  try {
     const c = document.createElement('canvas');
     c.width = c.height = 32;
     c.getContext('2d').drawImage(img, 0, 0, 32, 32);
@@ -332,8 +354,9 @@ async function probeRealImagery(src, tx, ty, z) {
       varSum += (lum - mean) * (lum - mean);
     }
     const variance = varSum / 1024;
-    return chrom > 500 || variance > 200;
-  } catch { return false; }
+    const real = chrom > 500 || variance > 200;
+    return { ok: real, reason: real ? 'ok' : 'placeholder' };
+  } catch { return { ok: false, reason: 'exception' }; }
 }
 
 // Walk a single source from `requestedZoom` down to its minimum, returning
@@ -351,12 +374,14 @@ async function _pickZoomForSource(src, bb, requestedZoom, diag) {
   while (z >= ZOOM_FLOOR) {
     const ctr = deg2tile(lat, lon, z);
     if (src.probePlaceholder) {
-      if (await probeRealImagery(src, ctr.x, ctr.y, z)) return { src, zoom: z };
-      diag && diag.push(`${src.name} z${z}: placeholder/網絡失敗`);
+      const probe = await probeRealImagery(src, ctr.x, ctr.y, z);
+      if (probe.ok) return { src, zoom: z };
+      diag && diag.push(`${src.name} z${z}: ${probe.reason}`);
     } else {
+      // Cheaper path: just check the tile loads at all (HTTP 200 + decodable).
       const img = await loadTileImg(src.url(z, ctr.x, ctr.y));
       if (img) { img.close && img.close(); return { src, zoom: z }; }
-      diag && diag.push(`${src.name} z${z}: タイル取得失敗`);
+      diag && diag.push(`${src.name} z${z}: network`);
     }
     z--;
   }
