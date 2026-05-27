@@ -265,6 +265,35 @@ const AERIAL_SOURCES = [
     probePlaceholder: true,      // ESRI serves a placeholder when imagery missing
   },
   {
+    // Bing Maps Aerial. Different host (ecn.t*.tiles.virtualearth.net)
+    // than ESRI / EOX, so most domain blockers and Tracking Prevention
+    // rules don't catch it. Quadkey-encoded tile URLs — convert
+    // {z,x,y} into a single string and Bing serves the right ortho.
+    // Coverage broadly matches ESRI globally (Microsoft licences from
+    // similar suppliers); useful when ESRI returns "no data" for an
+    // area or its domain is blocked.
+    id:    'bing',
+    name:  'Bing Maps Aerial',
+    label: 'Bing Maps Aerial (zoom 19, global ~30cm/px in cities)',
+    url: (z, tx, ty) => {
+      let key = '';
+      for (let i = z; i > 0; i--) {
+        let digit = 0;
+        const mask = 1 << (i - 1);
+        if ((tx & mask) !== 0) digit += 1;
+        if ((ty & mask) !== 0) digit += 2;
+        key += digit;
+      }
+      const sub = (tx + ty) & 3;  // 0..3, balances across t0..t3
+      return `https://ecn.t${sub}.tiles.virtualearth.net/tiles/a${key}.jpeg?g=1`;
+    },
+    minZoom: 1, maxZoom: 19,
+    bbox: null,
+    // Bing returns a watermarked "no data" PNG in unmapped areas — same
+    // pattern as ESRI's placeholder, so we run the chroma/variance probe.
+    probePlaceholder: true,
+  },
+  {
     id:    'gsi_ort',
     name:  '国土地理院 ort',
     label: '国土地理院 オルソ (zoom 18, ~25cm/px, 主要都市部)',
@@ -289,16 +318,33 @@ const AERIAL_SOURCES = [
     probePlaceholder: false,
   },
   {
-    // Last-resort global fallback. Sentinel-2 cloudless mosaic by EOX —
-    // free, no API key, CC BY 4.0, ~10 m/px native resolution. Useful
-    // when ESRI is blocked (corporate firewall, browser Tracking
-    // Prevention, etc) and the user is outside Japan so GSI is out too.
+    // Last-resort global aerial fallback. Sentinel-2 cloudless mosaic
+    // by EOX — free, no API key, CC BY 4.0, ~10 m/px native resolution.
+    // Useful when ESRI / Bing are both blocked and the user is outside
+    // Japan so GSI is out too. Uses s2maps-tiles.eu (different origin
+    // from tiles.maps.eox.at; same data, occasionally one host works
+    // when the other doesn't due to corporate DNS or CDN routing).
     id:    's2maps',
     name:  'Sentinel-2 cloudless (EOX)',
     label: 'Sentinel-2 cloudless (~10m/px, 全球バックアップ)',
     url: (z, tx, ty) =>
-      `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2023_3857/default/g/${z}/${ty}/${tx}.jpg`,
+      `https://s2maps-tiles.eu/wmts/1.0.0/s2cloudless-2020_3857/default/g/${z}/${ty}/${tx}.jpg`,
     minZoom: 0, maxZoom: 14,
+    bbox: null,
+    probePlaceholder: false,
+  },
+  {
+    // Absolute-last resort. Not satellite — it's the standard OSM line
+    // map. Reachable from essentially every network on earth (CDN by
+    // OSMF + Cloudflare, hammered by every mapping tutorial in
+    // existence). Drops the user into a flat-coloured cartographic
+    // backdrop instead of a black void when every aerial source is
+    // simultaneously down / blocked.
+    id:    'osm',
+    name:  'OpenStreetMap (地図)',
+    label: 'OpenStreetMap 地図タイル (航空写真ではないが必ず動く)',
+    url: (z, tx, ty) => `https://tile.openstreetmap.org/${z}/${tx}/${ty}.png`,
+    minZoom: 0, maxZoom: 19,
     bbox: null,
     probePlaceholder: false,
   },
