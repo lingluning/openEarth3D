@@ -281,6 +281,12 @@ const PHOTO_SOURCES = Object.fromEntries(AERIAL_SOURCES.map(s => [s.id, s]));
 // Missing fields fall back to safe defaults so a "just a URL" entry works.
 function makeCustomAerialSource(spec) {
   if (typeof spec === 'string') spec = { url: spec };
+  if (!spec || (typeof spec.url !== 'string' && typeof spec.url !== 'function')) {
+    // Bad JSON entry — caller filters out null. Log so user can spot
+    // the offending row in their textarea.
+    console.warn('カスタムソース無効 (url が未指定):', spec);
+    return null;
+  }
   const tpl = spec.url;
   const urlFn = typeof tpl === 'function'
     ? tpl
@@ -331,21 +337,26 @@ async function probeRealImagery(src, tx, ty, z) {
 }
 
 // Walk a single source from `requestedZoom` down to its minimum, returning
-// the highest zoom whose centre tile is real imagery. Used by both forced
-// and auto modes.
-async function _pickZoomForSource(src, bb, requestedZoom) {
+// the highest zoom whose centre tile is real imagery. `diag` accumulates
+// per-zoom probe results so the caller can format a useful error if every
+// source ends up failing.
+async function _pickZoomForSource(src, bb, requestedZoom, diag) {
   let z = Math.min(requestedZoom, src.maxZoom);
-  if (z < src.minZoom) return null;
+  if (z < src.minZoom) {
+    diag && diag.push(`${src.name}: requestedZoom < minZoom`);
+    return null;
+  }
   const lat = (bb.n + bb.s) / 2, lon = (bb.w + bb.e) / 2;
-  const ZOOM_FLOOR = Math.max(14, src.minZoom);  // give up below this
+  const ZOOM_FLOOR = Math.max(12, src.minZoom);  // give up below this
   while (z >= ZOOM_FLOOR) {
     const ctr = deg2tile(lat, lon, z);
     if (src.probePlaceholder) {
       if (await probeRealImagery(src, ctr.x, ctr.y, z)) return { src, zoom: z };
+      diag && diag.push(`${src.name} z${z}: placeholder/網絡失敗`);
     } else {
-      // Cheaper path: just check the tile loads at all (HTTP 200 + decodable).
       const img = await loadTileImg(src.url(z, ctr.x, ctr.y));
       if (img) { img.close && img.close(); return { src, zoom: z }; }
+      diag && diag.push(`${src.name} z${z}: タイル取得失敗`);
     }
     z--;
   }
@@ -357,33 +368,47 @@ async function _pickZoomForSource(src, bb, requestedZoom) {
 //   mode = id       → force that exact built-in source, still probe-degrade
 //   mode = 'custom' → walk user customs only (no built-in fallback)
 // `customs` is an array of spec objects (see makeCustomAerialSource).
+// Returns either { src, zoom } or { failed: true, diag: [..] } so the
+// caller can show the user what was tried and at which zoom.
 async function pickAerialSource(bb, requestedZoom, mode, customs) {
   const cs = Array.isArray(customs) ? customs : (customs ? [customs] : []);
-  const customSources = cs.map(makeCustomAerialSource);
+  // filter(Boolean) drops invalid specs (no url field) — they were
+  // already warned about in makeCustomAerialSource.
+  const customSources = cs.map(makeCustomAerialSource).filter(Boolean);
+  const diag = [];
 
   if (mode === 'custom') {
-    if (customSources.length === 0) throw new Error('カスタムソースが未設定');
+    if (customSources.length === 0) {
+      throw new Error('カスタムソースが未設定 — JSON が空または無効です');
+    }
     for (const src of customSources) {
-      if (src.bbox && !_bboxIntersects(src.bbox, bb)) continue;
-      const result = await _pickZoomForSource(src, bb, requestedZoom);
+      if (src.bbox && !_bboxIntersects(src.bbox, bb)) {
+        diag.push(`${src.name}: bbox 範囲外`);
+        continue;
+      }
+      const result = await _pickZoomForSource(src, bb, requestedZoom, diag);
       if (result) return result;
     }
-    return null;
+    return { failed: true, diag };
   }
   if (mode && mode !== 'auto') {
     const src = PHOTO_SOURCES[mode];
     if (!src) throw new Error(`unknown aerial source: ${mode}`);
-    return _pickZoomForSource(src, bb, requestedZoom);
+    const result = await _pickZoomForSource(src, bb, requestedZoom, diag);
+    return result || { failed: true, diag };
   }
   // Auto: user customs first (highest priority — typically highest precision),
   // then built-in fallbacks.
   const list = [...customSources, ...AERIAL_SOURCES];
   for (const src of list) {
-    if (src.bbox && !_bboxIntersects(src.bbox, bb)) continue;
-    const result = await _pickZoomForSource(src, bb, requestedZoom);
+    if (src.bbox && !_bboxIntersects(src.bbox, bb)) {
+      diag.push(`${src.name}: bbox 範囲外`);
+      continue;
+    }
+    const result = await _pickZoomForSource(src, bb, requestedZoom, diag);
     if (result) return result;
   }
-  return null;
+  return { failed: true, diag };
 }
 
 // Fetch an image tile through the cache and decode to an ImageBitmap.
@@ -406,7 +431,19 @@ async function fetchAerialPhoto(bb, requestedZoom, onProgress, opts) {
   const customs = o.customs || (o.customUrl ? [{ url: o.customUrl }] : []);
 
   const chosen = await pickAerialSource(bb, requestedZoom, mode, customs);
-  if (!chosen) throw new Error('利用可能な航空写真ソースが見つかりません');
+  if (!chosen || chosen.failed) {
+    // chosen.diag lists what was tried so the user / dev can see why
+    // every source bowed out. Most common cause: every source's centre
+    // tile failed the placeholder probe — usually network/Tracking-
+    // Prevention blocking ESRI, OR a rural area where ESRI returns
+    // their solid-colour low-res tiles that don't pass the chroma test.
+    const diag = (chosen && chosen.diag) || [];
+    console.warn('航空写真 picker 全失敗:', diag);
+    throw new Error(
+      '利用可能な航空写真ソースが見つかりません — 詳細は console を確認 ' +
+      `(試行 ${diag.length} 件)`
+    );
+  }
 
   const src = chosen.src;
   const effectiveZoom = chosen.zoom;
