@@ -126,10 +126,12 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
       <div style="margin-top:10px">
         <label>航空写真ソース</label>
         <select id="photoSource" style="width:100%;margin-top:3px;background:#1a1a2e;border:1px solid #0f3460;color:#e0e0f0;padding:5px 8px;border-radius:5px;font-size:0.82rem">
-          <option value="auto" selected>自動（カスタム → ESRI → GSI ort → GSI seamless）✨</option>
+          <option value="auto" selected>自動（カスタム → USGS → ESRI → GSI → Sentinel-2）✨</option>
+          <option value="usgs">USGS National Map 強制 (北米 ~30cm)</option>
           <option value="esri">ESRI World Imagery 強制</option>
           <option value="gsi_ort">国土地理院 ort 強制 (~25cm)</option>
           <option value="gsi">国土地理院 seamless 強制 (~60cm)</option>
+          <option value="s2maps">Sentinel-2 cloudless 強制 (全球 ~10m)</option>
           <option value="custom">カスタムソースのみ</option>
         </select>
         <details style="margin-top:6px">

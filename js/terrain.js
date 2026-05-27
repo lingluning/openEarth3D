@@ -227,6 +227,24 @@ async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
 // dataset or self-hosted drone server can win against the built-in fallbacks.
 const AERIAL_SOURCES = [
   {
+    id:    'usgs',
+    name:  'USGS National Map',
+    label: 'USGS Imagery (zoom 19, 北米 ~30cm/px)',
+    // USGS ImageryOnly REST tile service. ArcGIS-style {z}/{y}/{x}
+    // ordering. Public domain, no API key. Coverage = USA + Alaska +
+    // Hawaii + Puerto Rico. Hosted on basemap.nationalmap.gov (different
+    // origin than ESRI), so if Tracking Prevention or a corporate
+    // firewall blocks server.arcgisonline.com this one usually still
+    // works.
+    url: (z, tx, ty) =>
+      `https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/${z}/${ty}/${tx}`,
+    minZoom: 0, maxZoom: 19,
+    // Wide bbox covering CONUS + Alaska + Hawaii + Puerto Rico. Outside
+    // this we skip the probe entirely so non-US users don't pay for it.
+    bbox: { s: 17, n: 72, w: -180, e: -65 },
+    probePlaceholder: false,
+  },
+  {
     id:    'esri',
     name:  'ESRI World Imagery',
     label: 'ESRI World Imagery (zoom 19, ~30cm/px)',
