@@ -601,6 +601,7 @@ function resetBuildingCaches() {
   for (const k in _facadeCache) delete _facadeCache[k];
   for (const k in _roofTexCache) delete _roofTexCache[k];
   for (const k in _shopfrontCache) delete _shopfrontCache[k];
+  _roofEquipMat = null;  // disposed by clearSceneObjects; rebuild next run
 }
 
 function _getWallMat(style, bucket = 0) {
@@ -841,8 +842,79 @@ function _makeRoofGeo(shape, footprint, baseY, topY) {
   }
 }
 
+// ── Rooftop equipment ───────────────────────────────────────────────────
+// HVAC units, water tanks, stairwell housings — the clutter that makes a
+// flat roof read as a real building from an oblique / top-down view
+// instead of a clean slab. Shared flat-grey material (no texture).
+let _roofEquipMat = null;
+function _getRoofEquipMat() {
+  if (!_roofEquipMat) {
+    _roofEquipMat = new THREE.MeshLambertMaterial({ color: 0x8a8a86 });
+    _roofEquipMat.name = 'roof_equipment';
+  }
+  return _roofEquipMat;
+}
+
+function _ptInPoly2d(x, z, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, zi = poly[i].z, xj = poly[j].x, zj = poly[j].z;
+    if (((zi > z) !== (zj > z)) &&
+        (x < (xj - xi) * (z - zi) / (zj - zi + 1e-9) + xi)) inside = !inside;
+  }
+  return inside;
+}
+
+// Emit 5 faces of an axis-aligned box (top + 4 sides; bottom omitted —
+// it sits on the roof). Winding hand-verified for +X-east / +Y-up /
+// +Z-south so every outward normal is correct.
+function _emitBox(P, cx, cz, bx, bz, by, y0) {
+  const xl = cx - bx/2, xr = cx + bx/2;
+  const zb = cz - bz/2, zf = cz + bz/2;
+  const y1 = y0 + by;
+  P.push(xl,y1,zb, xr,y1,zf, xr,y1,zb,  xl,y1,zb, xl,y1,zf, xr,y1,zf); // top +Y
+  P.push(xl,y0,zb, xr,y1,zb, xr,y0,zb,  xl,y0,zb, xl,y1,zb, xr,y1,zb); // north -Z
+  P.push(xr,y0,zf, xl,y1,zf, xl,y0,zf,  xr,y0,zf, xr,y1,zf, xl,y1,zf); // south +Z
+  P.push(xl,y0,zf, xl,y1,zb, xl,y0,zb,  xl,y0,zf, xl,y1,zf, xl,y1,zb); // west -X
+  P.push(xr,y0,zb, xr,y1,zf, xr,y0,zf,  xr,y0,zb, xr,y1,zb, xr,y1,zf); // east +X
+}
+
+function _emitRoofEquipment(out, footprint, roofY, bucket, areaM2) {
+  const rng = _seededRng((bucket * 0x2f1b + 911) >>> 0);
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of footprint) {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+  }
+  // More boxes on bigger roofs, capped at 6.
+  const count = Math.min(6, 2 + Math.floor(areaM2 / 400) + Math.floor(rng() * 2));
+  const P = [];
+  let placed = 0, tries = 0;
+  while (placed < count && tries < count * 6) {
+    tries++;
+    const x = minX + rng() * (maxX - minX);
+    const z = minZ + rng() * (maxZ - minZ);
+    if (!_ptInPoly2d(x, z, footprint)) continue;
+    const bx = 1 + rng() * 2;    // 1-3 m
+    const bz = 1 + rng() * 2;
+    const by = 1 + rng() * 1.5;  // 1-2.5 m
+    _emitBox(P, x, z, bx, bz, by, roofY);
+    placed++;
+  }
+  if (P.length === 0) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+  geo.computeVertexNormals();
+  out.push({ geometry: geo, material: _getRoofEquipMat() });
+}
+
 // ── Building assembly ──────────────────────────────────────────────────────
-function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
+// Emits geometry parts as { geometry, material } into `out` rather than
+// building a Mesh per part. createBuildingGroup then merges everything that
+// shares a material into one BufferGeometry — turning hundreds of draw
+// calls (2-4 meshes × hundreds of buildings) into a handful (one per
+// distinct material = ~style × bucket).
+function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
 
   const pts2d = building.coords.map(c => ({
@@ -865,18 +937,12 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   const cz = pts2d.reduce((s, p) => s + p.z, 0) / pts2d.length;
   const baseElev = getElevAt(elevGrid, gridN, cx / xSize, cz / zSize) * vertExag;
 
-  // parseBuildings has already validated and clamped these so they're safe
-  // to use directly: minH < totalH, roofH ≤ totalH - minH - 2.
   const style = getBuildingStyle(building.tags);
   const minH  = building.minH;
   const totalH = building.height;
 
-  // Fan-triangulated pitched roofs (pyramidal/gabled) need a convex
-  // footprint — on L/U/T-shaped polygons the fan triangles either leave
-  // visible holes or fold over each other, which is exactly the "roofs
-  // are partial" symptom users hit. Demote to flat here so the building
-  // still reaches its tagged height instead of standing under a half-
-  // missing roof.
+  // Fan-triangulated pitched roofs need a convex footprint — demote
+  // non-convex (L/U/T) to flat so they reach full height without holes.
   let roofShape = building.roofShape;
   let roofH     = building.roofH;
   if (roofShape !== 'flat' && roofShape !== 'dome' && !_isConvex(pts2d)) {
@@ -887,81 +953,97 @@ function buildingToMesh(building, bb, elevGrid, gridN, vertExag) {
   const wallTop = baseElev + minH + (totalH - roofH);
   const roofTop = baseElev + minH + totalH;
   const baseY   = baseElev + minH;
+  const bucket  = _buildingBucket(building.coords);
 
-  // Per-building variant bucket — drives the HSL jitter on wall/roof
-  // material and the random seed for the facade window pattern. Same
-  // bucket → cached material; total cache size stays ~5 styles × 2
-  // types × 8 buckets ≈ 80 entries.
-  const bucket = _buildingBucket(building.coords);
-  const group = new THREE.Group();
-
-  // Walls: side quads only, with UVs ready for facade texture.
-  //
-  // Commercial / mixed-use / large generic buildings get a separate
-  // ground-floor band with a shopfront texture (big glass + signage).
-  // Upper floors keep the regular facade. Threshold of 6 m total height
-  // avoids forcing storefronts on single-storey shacks where it'd look
-  // off-scale.
+  // Ground-floor shopfront band for commercial / large generic buildings.
   const wallH = wallTop - baseY;
   const wantShopfront = wallH >= 6 && _hasShopfront(building.tags, building.area, totalH);
   const groundH = wantShopfront ? Math.min(3.5, wallH * 0.25) : 0;
   const groundTopY = baseY + groundH;
 
   if (wantShopfront) {
-    // Ground floor — one texture height covers the full band, no repeat.
-    const groundGeo = _makeWallsGeo(pts2d, baseY, groundTopY, groundH);
-    const groundMesh = new THREE.Mesh(groundGeo, _getShopfrontMat(style, bucket));
-    groundMesh.castShadow = true;
-    groundMesh.receiveShadow = true;
-    group.add(groundMesh);
+    out.push({ geometry: _makeWallsGeo(pts2d, baseY, groundTopY, groundH),
+               material: _getShopfrontMat(style, bucket) });
   }
+  out.push({ geometry: _makeWallsGeo(pts2d, groundTopY, wallTop),
+             material: _getWallMat(style, bucket) });
 
-  // Upper floors (or whole wall if no shopfront).
-  const wallGeo = _makeWallsGeo(pts2d, groundTopY, wallTop);
-  const wallMesh = new THREE.Mesh(wallGeo, _getWallMat(style, bucket));
-  wallMesh.castShadow = true;
-  wallMesh.receiveShadow = true;
-
-  // Roof: matches the OSM roof:shape tag (or our inference if absent).
-  // Use the locally-demoted roofShape so non-convex footprints get the
-  // flat roof + tile-vs-membrane choice we actually computed above.
   const pitched = roofShape !== 'flat' && roofH > 0.5;
-  const roofGeo = _makeRoofGeo(roofShape, pts2d, wallTop, roofTop);
-  const roofMesh = new THREE.Mesh(roofGeo, _getRoofMat(style, pitched, bucket));
-  roofMesh.castShadow = true;
-  roofMesh.receiveShadow = true;
+  out.push({ geometry: _makeRoofGeo(roofShape, pts2d, wallTop, roofTop),
+             material: _getRoofMat(style, pitched, bucket) });
 
-  group.add(wallMesh);
-  group.add(roofMesh);
-
-  // Parapet for tall enough flat-roofed buildings — small wall ring above
-  // the roof slab plus a thin concrete cap. Gives the silhouette the
-  // characteristic "raised lip" that flat roofs actually have in real
-  // life; without it everything just stops at the wall plane.
-  // Skip on tiny structures (sheds, small houses) where it'd look weird.
+  // Parapet on tall flat roofs.
   if (roofShape === 'flat' && totalH >= 6 && building.area >= 25) {
-    const parapetH = Math.min(1.0, 0.4 + totalH * 0.012);  // ~0.4-1.0 m
-    const parapetGeo = _makeWallsGeo(pts2d, wallTop, wallTop + parapetH);
-    const parapetMesh = new THREE.Mesh(parapetGeo, _getWallMat(style, bucket));
-    parapetMesh.castShadow = true;
-    parapetMesh.receiveShadow = true;
-    group.add(parapetMesh);
-    // Concrete cap closing the top of the parapet ring.
-    const capGeo = _makeFlatRoofGeo(pts2d, wallTop + parapetH);
-    const capMesh = new THREE.Mesh(capGeo, _getRoofMat(style, false, bucket));
-    capMesh.receiveShadow = true;
-    group.add(capMesh);
+    const parapetH = Math.min(1.0, 0.4 + totalH * 0.012);
+    out.push({ geometry: _makeWallsGeo(pts2d, wallTop, wallTop + parapetH),
+               material: _getWallMat(style, bucket) });
+    out.push({ geometry: _makeFlatRoofGeo(pts2d, wallTop + parapetH),
+               material: _getRoofMat(style, false, bucket) });
   }
 
-  return group;
+  // Rooftop equipment (HVAC / water tank / stairwell box) on flat roofs.
+  if (roofShape === 'flat' && totalH >= 9 && building.area >= 120) {
+    _emitRoofEquipment(out, pts2d, wallTop, bucket, building.area);
+  }
+}
+
+// Concatenate position / normal / uv of many geometries into one.
+// Indexed geometries (ShapeGeometry flat roofs, SphereGeometry domes) are
+// expanded to flat triangle soup first via toNonIndexed — otherwise their
+// shared-vertex index would be lost and the mesh would shatter. Normals
+// are preserved (recomputing would smooth across building boundaries);
+// geometries missing uv leave zeros in their slots.
+function _concatGeometries(geos) {
+  const flat = geos.map(g => g.index ? { geo: g.toNonIndexed(), temp: true }
+                                     : { geo: g, temp: false });
+  let posLen = 0;
+  for (const f of flat) posLen += f.geo.attributes.position.array.length;
+  const positions = new Float32Array(posLen);
+  const normals   = new Float32Array(posLen);
+  const uvs       = new Float32Array((posLen / 3) * 2);
+  let po = 0, uo = 0;
+  for (const f of flat) {
+    const g = f.geo;
+    const pa = g.attributes.position.array;
+    positions.set(pa, po);
+    if (g.attributes.normal) normals.set(g.attributes.normal.array, po);
+    if (g.attributes.uv) uvs.set(g.attributes.uv.array, uo);
+    po += pa.length;
+    uo += (pa.length / 3) * 2;
+    if (f.temp) g.dispose();   // free the toNonIndexed scratch copy
+  }
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  merged.setAttribute('normal',   new THREE.BufferAttribute(normals, 3));
+  merged.setAttribute('uv',       new THREE.BufferAttribute(uvs, 2));
+  return merged;
 }
 
 function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag) {
-  const group = new THREE.Group();
+  // Collect every geometry part across all buildings, keyed by material.
+  const byMaterial = new Map();
   for (const b of buildings) {
+    const parts = [];
     try {
-      group.add(buildingToMesh(b, bb, elevGrid, gridN, vertExag));
-    } catch {}
+      buildingToParts(b, bb, elevGrid, gridN, vertExag, parts);
+    } catch { continue; }
+    for (const part of parts) {
+      if (!byMaterial.has(part.material)) byMaterial.set(part.material, []);
+      byMaterial.get(part.material).push(part.geometry);
+    }
+  }
+
+  // One merged mesh per material.
+  const group = new THREE.Group();
+  group.name = 'buildings';
+  for (const [material, geos] of byMaterial) {
+    if (geos.length === 0) continue;
+    const merged = _concatGeometries(geos);
+    geos.forEach(g => g.dispose());  // free the per-building scratch geos
+    const mesh = new THREE.Mesh(merged, material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
   }
   return group;
 }
