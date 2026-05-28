@@ -95,6 +95,74 @@ function _posFloat(raw, fallback) {
   return (isFinite(v) && v > 0) ? v : fallback;
 }
 
+// Parse a length that may carry units. OSM heights show up as "12",
+// "12 m", "12m", "40'" (feet), "40 ft", "12.5 metres". Returns metres
+// or null if unparseable. Capturing the unit variants alone recovers a
+// surprising number of buildings whose height we were silently dropping.
+function _parseLengthM(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim().toLowerCase();
+  let m = s.match(/^([\d.]+)\s*(?:'|ft|feet)$/);          // feet
+  if (m) return parseFloat(m[1]) * 0.3048;
+  m = s.match(/^([\d.]+)\s*(?:m|metre|meter|metres|meters)?$/);  // metres
+  if (m) { const v = parseFloat(m[1]); return isFinite(v) && v > 0 ? v : null; }
+  return null;
+}
+
+// Floor-to-floor height by building type. Offices / retail have taller
+// storeys than apartments; industrial sheds and religious halls taller
+// still. Used both to convert `building:levels` → metres and to estimate
+// untagged buildings.
+function _floorHeightFor(tags) {
+  const t = (tags.building || '').toLowerCase();
+  if (['commercial','retail','office','hotel','mall','department_store',
+       'supermarket','civic','public','hospital','school'].includes(t)) return 3.9;
+  if (['industrial','warehouse','factory','hangar','depot'].includes(t)) return 6.0;
+  if (['church','cathedral','temple','shrine','mosque','pagoda'].includes(t)) return 6.5;
+  if (['house','detached','bungalow','cabin','cottage'].includes(t)) return 3.0;
+  if (['apartments','residential','dormitory'].includes(t)) return 3.0;
+  return 3.3;
+}
+
+// Best-effort building height in metres, in priority order:
+//   1. explicit height / building:height / est_height (with unit parsing)
+//   2. (building:levels + roof:levels) × type-aware floor height
+//   3. type + footprint-area inference for fully untagged buildings
+// This squeezes every height hint OSM actually carries (we used to only
+// read `height` and `building:levels` as bare floats, dropping anything
+// with a unit suffix or alternate tag) before falling back to inference.
+function _resolveHeight(tags, areaM2) {
+  const explicit =
+    _parseLengthM(tags.height) ??
+    _parseLengthM(tags['building:height']) ??
+    _parseLengthM(tags['est_height']);
+  if (explicit != null) return explicit;
+
+  const fh = _floorHeightFor(tags);
+  const levelsRaw = tags['building:levels'] ?? tags['levels'];
+  if (levelsRaw != null) {
+    const levels = _posFloat(levelsRaw, 0);
+    const roofLv = _posFloat(tags['roof:levels'], 0);
+    if (levels > 0) return Math.max(2.5, (levels + roofLv) * fh);
+  }
+
+  // Fully untagged — infer from type + footprint area.
+  const t = (tags.building || '').toLowerCase();
+  if (['warehouse','industrial','factory','retail','supermarket',
+       'hangar','depot','parking'].includes(t)) {
+    return fh * (areaM2 > 2000 ? 1 : 2);          // big-box: 1-2 storeys
+  }
+  if (['house','detached','bungalow','cabin','cottage','hut','shed'].includes(t)) {
+    return fh * 2;                                 // houses: ~2 storeys
+  }
+  // Generic / apartments / yes: small dense footprints tend taller,
+  // sprawling footprints tend lower.
+  if (areaM2 < 120)  return fh * 3;
+  if (areaM2 < 400)  return fh * 4;
+  if (areaM2 < 2000) return fh * 3;
+  return fh * 2;
+}
+
 function parseBuildings(elements, bb) {
   const nodeMap = {};
   elements.filter(e => e.type === 'node').forEach(n => { nodeMap[n.id] = n; });
@@ -132,16 +200,18 @@ function parseBuildings(elements, bb) {
       .map(n => ({ lat: n.lat, lon: n.lon }));
     if (coords.length < 3) continue;
 
-    // Validated numerics. Defaults guard against missing / malformed tags
-    // ("yes", "12 m", negative levels) and prevent inverted geometry.
-    const levels  = _posFloat(tags['building:levels'] || tags['levels'], 2);
-    const height  = _posFloat(tags.height, Math.max(3, levels * 3.2));
-    let   minH    = _posFloat(tags.min_height, 0);
+    // Footprint area first — height inference for untagged buildings
+    // depends on it.
+    const area      = _footprintAreaM2(coords, bb);
+    // Squeeze every height hint OSM carries (units, building:height,
+    // est_height, levels+roof:levels) before inferring from type+area.
+    const height    = _resolveHeight(tags, area);
+    let   minH      = _parseLengthM(tags.min_height) || 0;
     if (minH >= height) minH = 0; // a floating slab makes no sense; ignore
 
-    const area      = _footprintAreaM2(coords, bb);
     const roofShape = _inferRoofShape(tags, area, height);
-    let   roofH     = _posFloat(tags['roof:height'], _inferRoofHeight(roofShape, height, area));
+    const roofHTag  = _parseLengthM(tags['roof:height']);
+    let   roofH     = roofHTag != null ? roofHTag : _inferRoofHeight(roofShape, height, area);
     // Roof can't be taller than the building above its min_height base.
     roofH = Math.min(roofH, Math.max(0, height - minH - 2));
 
