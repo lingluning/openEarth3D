@@ -480,73 +480,93 @@ function createTrees(treePoints, forests, bb, elevGrid, gridN, vertExag) {
   }
   if (placements.length === 0) return new THREE.Group();
 
-  // Trunk + crown sized for a roughly 7-8 m tree at scale 1.
-  const trunkGeo = new THREE.CylinderGeometry(0.25, 0.35, 2.5, 6);
+  // Only trees inside the bbox; classify each into a species so the
+  // canopy isn't a regiment of identical cones.
+  const inside = [];
+  for (const t of placements) {
+    const x = toLocalX(t.lon, bb), z = toLocalZ(t.lat, bb);
+    if (x < 0 || x > xSize || z < 0 || z > zSize) continue;
+    // ~55 % deciduous (round crown), ~45 % coniferous (cone crown).
+    inside.push({ x, z, conifer: Math.random() < 0.45 });
+  }
+  if (inside.length === 0) return new THREE.Group();
+
+  // Shared trunk; two crown shapes.
+  const trunkGeo = new THREE.CylinderGeometry(0.22, 0.34, 2.5, 6);
   trunkGeo.translate(0, 1.25, 0);
   const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6e4e30 });
   trunkMat.name = 'tree_trunk';
 
-  const crownGeo = new THREE.ConeGeometry(2.2, 5.5, 8);
-  crownGeo.translate(0, 2.5 + 2.75, 0);
-  // setColorAt below tints individual crowns via instanceColor.
-  const crownMat = new THREE.MeshLambertMaterial({ color: 0x5a9a48 });
-  crownMat.name = 'tree_crown';
+  // Deciduous: rounded icosahedron crown sitting on the trunk top.
+  const decidGeo = new THREE.IcosahedronGeometry(2.4, 1);
+  decidGeo.scale(1, 1.15, 1);          // slightly egg-shaped
+  decidGeo.translate(0, 2.5 + 2.4, 0);
+  // Coniferous: tall cone.
+  const coniGeo = new THREE.ConeGeometry(2.0, 6.0, 8);
+  coniGeo.translate(0, 2.5 + 3.0, 0);
 
-  // Count only trees inside the bbox; we'll size the InstancedMesh tightly.
-  const inside = [];
-  for (const t of placements) {
-    const x = toLocalX(t.lon, bb), z = toLocalZ(t.lat, bb);
-    if (x >= 0 && x <= xSize && z >= 0 && z <= zSize) inside.push({ x, z });
-  }
-  if (inside.length === 0) return new THREE.Group();
+  const decidMat = new THREE.MeshLambertMaterial({ color: 0x5a9a48 });
+  decidMat.name = 'tree_crown_deciduous';
+  const coniMat = new THREE.MeshLambertMaterial({ color: 0x3f7a44 });
+  coniMat.name = 'tree_crown_conifer';
+
+  const nConifer = inside.reduce((s, t) => s + (t.conifer ? 1 : 0), 0);
+  const nDecid = inside.length - nConifer;
 
   const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, inside.length);
-  const crowns = new THREE.InstancedMesh(crownGeo, crownMat, inside.length);
-  // CRITICAL: r128's default bounding sphere is computed from the local
-  // geometry only, not the instance positions. Our instances are spread
-  // across hundreds of metres while the local geometry is a ~2 m tree at
-  // the origin, so the entire InstancedMesh gets frustum-culled the moment
-  // the camera looks at the terrain centre instead of the origin. Disable
-  // culling — vegetation never needs it.
-  trunks.frustumCulled = crowns.frustumCulled = false;
-  trunks.castShadow = crowns.castShadow = true;
-  trunks.receiveShadow = crowns.receiveShadow = false;
-  // Per-instance crown tint so the forest doesn't look like one paint chip.
-  crowns.instanceColor = new THREE.InstancedBufferAttribute(
-    new Float32Array(inside.length * 3), 3
-  );
+  const decid  = nDecid   ? new THREE.InstancedMesh(decidGeo, decidMat, nDecid) : null;
+  const coni   = nConifer ? new THREE.InstancedMesh(coniGeo,  coniMat, nConifer) : null;
+
+  // CRITICAL: r128's InstancedMesh bounding sphere is from the local
+  // geometry only, so spread-out instances get the whole mesh
+  // frustum-culled the moment the camera looks away from the origin.
+  for (const im of [trunks, decid, coni]) {
+    if (!im) continue;
+    im.frustumCulled = false;
+    im.castShadow = true;
+    im.receiveShadow = false;
+  }
+  if (decid) decid.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(nDecid * 3), 3);
+  if (coni)  coni.instanceColor  = new THREE.InstancedBufferAttribute(new Float32Array(nConifer * 3), 3);
 
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const pos = new THREE.Vector3();
   const scl = new THREE.Vector3();
-  const baseHue = new THREE.Color();
+  const hue = new THREE.Color();
+  const up = new THREE.Vector3(0, 1, 0);
+  let di = 0, ci = 0;
   for (let i = 0; i < inside.length; i++) {
-    const { x, z } = inside[i];
+    const { x, z, conifer } = inside[i];
     const y = getElevAt(elevGrid, gridN, x / xSize, z / zSize) * vertExag;
-    const s = 0.7 + Math.random() * 0.7;
-    pos.set(x, y, z); scl.set(s, s, s);
-    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.random() * Math.PI * 2);
+    // Conifers a touch taller and narrower; deciduous wider.
+    const s = (conifer ? 0.65 : 0.75) + Math.random() * 0.7;
+    pos.set(x, y, z);
+    scl.set(conifer ? s * 0.9 : s * 1.05, s, conifer ? s * 0.9 : s * 1.05);
+    q.setFromAxisAngle(up, Math.random() * Math.PI * 2);
     m.compose(pos, q, scl);
     trunks.setMatrixAt(i, m);
-    crowns.setMatrixAt(i, m);
 
-    // Random crown colour: olive → sage → forest. Three.js multiplies
-    // material.color by instanceColor, so a value near 1 leaves the
-    // material colour intact while small offsets shift the hue.
-    baseHue.setHSL(0.28 + (Math.random() - 0.5) * 0.06,
-                   0.45 + Math.random() * 0.25,
-                   0.40 + Math.random() * 0.18);
-    crowns.setColorAt(i, baseHue);
+    // Crown colour jitter — conifers darker/bluer green, deciduous brighter.
+    if (conifer) {
+      coni.setMatrixAt(ci, m);
+      hue.setHSL(0.33 + (Math.random()-0.5)*0.04, 0.42 + Math.random()*0.2, 0.30 + Math.random()*0.12);
+      coni.setColorAt(ci, hue); ci++;
+    } else {
+      decid.setMatrixAt(di, m);
+      hue.setHSL(0.26 + (Math.random()-0.5)*0.07, 0.48 + Math.random()*0.25, 0.42 + Math.random()*0.16);
+      decid.setColorAt(di, hue); di++;
+    }
   }
   trunks.instanceMatrix.needsUpdate = true;
-  crowns.instanceMatrix.needsUpdate = true;
-  if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
+  if (decid) { decid.instanceMatrix.needsUpdate = true; decid.instanceColor.needsUpdate = true; }
+  if (coni)  { coni.instanceMatrix.needsUpdate = true;  coni.instanceColor.needsUpdate = true; }
 
   const group = new THREE.Group();
   group.name = 'trees';
   group.add(trunks);
-  group.add(crowns);
+  if (decid) group.add(decid);
+  if (coni)  group.add(coni);
   return group;
 }
 
