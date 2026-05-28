@@ -35,7 +35,7 @@ function _resolveTerrainMesh(terrain) {
   return terrain;
 }
 
-async function _buildExportRoot(terrain, buildings, name) {
+async function _buildExportRoot(terrain, buildings, name, features) {
   if (!terrain) throw new Error('生成された3Dシーンがありません — まず3D表示を生成してください');
   const mesh = _resolveTerrainMesh(terrain);
   if (mesh.material && mesh.material.map) {
@@ -54,16 +54,20 @@ async function _buildExportRoot(terrain, buildings, name) {
   }
   root.add(t);
   if (buildings) root.add(buildings.clone());
+  // Ground features (roads / rails / water / bridges / trees). Trees are
+  // InstancedMesh — clone() preserves the instance buffers, and the
+  // exporters expand instances to real geometry on write.
+  if (features) root.add(features.clone());
   return root;
 }
 
 // ── DAE (Collada) ──────────────────────────────────────────────────────────
 // SketchUp-friendly: COLLADA 1.4.1, Y-up, Lambert materials, PNG textures.
-async function exportSceneAsDae(terrain, buildings, baseName) {
+async function exportSceneAsDae(terrain, buildings, baseName, features) {
   if (typeof THREE.ColladaExporter !== 'function') throw new Error('ColladaExporter not loaded');
   if (typeof JSZip !== 'function') throw new Error('JSZip not loaded');
 
-  const root = await _buildExportRoot(terrain, buildings, baseName);
+  const root = await _buildExportRoot(terrain, buildings, baseName, features);
   const result = new THREE.ColladaExporter().parse(root, null, {
     version: '1.4.1',
     author: 'openEarth3D',
@@ -94,10 +98,10 @@ async function exportSceneAsDae(terrain, buildings, baseName) {
 // ── GLB (binary glTF 2.0) ──────────────────────────────────────────────────
 // Single self-contained .glb — textures are embedded as binary buffers.
 // Universally supported: Blender, Windows 3D Viewer, web viewers, AR tools.
-async function exportSceneAsGlb(terrain, buildings, baseName) {
+async function exportSceneAsGlb(terrain, buildings, baseName, features) {
   if (typeof THREE.GLTFExporter !== 'function') throw new Error('GLTFExporter not loaded');
 
-  const root = await _buildExportRoot(terrain, buildings, baseName);
+  const root = await _buildExportRoot(terrain, buildings, baseName, features);
   const exporter = new THREE.GLTFExporter();
   const arrayBuffer = await new Promise((resolve, reject) => {
     exporter.parse(root, (out) => resolve(out), { binary: true, embedImages: true });
@@ -111,11 +115,11 @@ async function exportSceneAsGlb(terrain, buildings, baseName) {
 // Three.js's bundled OBJExporter only writes geometry; we generate the .mtl
 // ourselves so materials and texture links survive the round-trip into
 // Blender / SketchUp / 3ds Max / Cinema 4D.
-async function exportSceneAsObj(terrain, buildings, baseName) {
+async function exportSceneAsObj(terrain, buildings, baseName, features) {
   if (typeof THREE.OBJExporter !== 'function') throw new Error('OBJExporter not loaded');
   if (typeof JSZip !== 'function') throw new Error('JSZip not loaded');
 
-  const root = await _buildExportRoot(terrain, buildings, baseName);
+  const root = await _buildExportRoot(terrain, buildings, baseName, features);
 
   // Collect unique materials in traversal order so the OBJ's usemtl
   // references line up with the .mtl file we write below.
@@ -194,11 +198,11 @@ async function exportSceneAsObj(terrain, buildings, baseName) {
 }
 
 // Dispatch by format name; called from app.js.
-async function exportScene(format, terrain, buildings, baseName) {
+async function exportScene(format, terrain, buildings, baseName, features) {
   switch (format) {
-    case 'dae': return exportSceneAsDae(terrain, buildings, baseName);
-    case 'glb': return exportSceneAsGlb(terrain, buildings, baseName);
-    case 'obj': return exportSceneAsObj(terrain, buildings, baseName);
+    case 'dae': return exportSceneAsDae(terrain, buildings, baseName, features);
+    case 'glb': return exportSceneAsGlb(terrain, buildings, baseName, features);
+    case 'obj': return exportSceneAsObj(terrain, buildings, baseName, features);
     default: throw new Error('Unknown export format: ' + format);
   }
 }

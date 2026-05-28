@@ -10,7 +10,7 @@ const PHOTO_ZOOM = 22;
 const LS_KEY     = 'openearth3d:lastInputs';
 
 let leafletMap, leafletMarker;
-let currentTerrain = null, currentBuildings = null;
+let currentTerrain = null, currentBuildings = null, currentFeatures = null;
 // Kept for click-to-inspect: the parsed OSM building array + the bbox they
 // were built in, so a raycast hit can be matched back to a footprint.
 let currentBuildingData = null, currentBB = null;
@@ -349,6 +349,7 @@ async function run() {
   scene.add(currentTerrain);
   placeCameraOverTerrain(elevGrid, meshN, xSize, zSize, vertExag);
   currentBuildings = null;
+  currentFeatures = null;
   currentBuildingData = null;   // PLATEAU path leaves this null (no footprints)
   currentBB = bb;
 
@@ -385,9 +386,11 @@ async function run() {
       featGroup.name = 'ground-features';
       featGroup.add(createWater(feats.waters, bb, elevGrid, meshN, vertExag));
       featGroup.add(createRoads(feats.roads, bb, elevGrid, meshN, vertExag));
+      featGroup.add(createRailways(feats.rails, bb, elevGrid, meshN, vertExag));
       featGroup.add(createBridges(feats.bridges, bb, elevGrid, meshN, vertExag));
       featGroup.add(createTrees(feats.trees, feats.forests, bb, elevGrid, meshN, vertExag));
       scene.add(featGroup);
+      currentFeatures = featGroup;   // for export
 
       // PLATEAU path
       let usedPlateau = false;
@@ -487,7 +490,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const lat = parseFloat(document.getElementById('latInput').value);
       const lon = parseFloat(document.getElementById('lonInput').value);
       const name = `openEarth3D_${lat.toFixed(4)}_${lon.toFixed(4)}`;
-      await exportScene(select.value, currentTerrain, currentBuildings, name);
+      await exportScene(select.value, currentTerrain, currentBuildings, name, currentFeatures);
     } catch (e) {
       showError('エクスポート失敗: ' + e.message);
       console.error(e);

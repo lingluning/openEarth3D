@@ -19,6 +19,7 @@ async function fetchGroundFeatures(bb) {
   way["landuse"="grass"](${bb.s},${bb.w},${bb.n},${bb.e});
   way["landuse"="cemetery"](${bb.s},${bb.w},${bb.n},${bb.e});
   way["natural"="scrub"](${bb.s},${bb.w},${bb.n},${bb.e});
+  way["railway"~"^(rail|light_rail|subway|tram|monorail|narrow_gauge)$"](${bb.s},${bb.w},${bb.n},${bb.e});
   node["natural"="tree"](${bb.s},${bb.w},${bb.n},${bb.e});
 );
 out body;>;out skel qt;`;
@@ -61,7 +62,7 @@ function parseGroundFeatures(elements, bb) {
   const nodeMap = {};
   elements.filter(e => e.type === 'node').forEach(n => { nodeMap[n.id] = n; });
 
-  const roads = [], waters = [], forests = [], trees = [], bridges = [];
+  const roads = [], waters = [], forests = [], trees = [], bridges = [], rails = [];
 
   for (const e of elements) {
     if (e.type === 'way' && e.tags) {
@@ -72,7 +73,12 @@ function parseGroundFeatures(elements, bb) {
         .map(n => ({ lat: n.lat, lon: n.lon }));
       if (coords.length < 2) continue;
 
-      if (t.highway) {
+      if (t.railway) {
+        // Subways underground (layer<0 and tunnel) are skipped — they'd
+        // render as lines buried in the terrain.
+        if (t.tunnel === 'yes' || parseInt(t.layer, 10) < 0) continue;
+        rails.push({ coords, kind: t.railway });
+      } else if (t.highway) {
         const style = ROAD_STYLES[t.highway] || ROAD_STYLES.unclassified;
         // OSM tags bridges with `bridge=*` on the underlying highway way.
         // `bridge=no` means "explicitly not a bridge" (rare), everything
@@ -108,7 +114,91 @@ function parseGroundFeatures(elements, bb) {
       trees.push({ lat: e.lat, lon: e.lon });
     }
   }
-  return { roads, waters, forests, trees, bridges };
+  return { roads, waters, forests, trees, bridges, rails };
+}
+
+// ── Railways — dark ballast ribbon + rail lines on top ────────────────────
+// Reuses the road ribbon builder for the ballast bed, then lays two thin
+// bright rails along it so tracks read as tracks rather than just another
+// grey road.
+function createRailways(rails, bb, elevGrid, gridN, vertExag) {
+  const group = new THREE.Group();
+  group.name = 'railways';
+  if (!rails || rails.length === 0) return group;
+
+  const ballastPos = [], ballastUV = [], railPos = [];
+  const RAIL_W = { rail: 4.2, light_rail: 3.6, subway: 3.6, tram: 3.0, monorail: 3.0, narrow_gauge: 3.0 };
+
+  for (const r of rails) {
+    const w = RAIL_W[r.kind] || 3.6;
+    // Ballast bed via the shared ribbon builder.
+    const g = _buildRoadRibbon(r.coords, w, bb, elevGrid, gridN, vertExag);
+    const p = g.attributes.position.array, u = g.attributes.uv.array;
+    for (let i = 0; i < p.length; i++) ballastPos.push(p[i]);
+    for (let i = 0; i < u.length; i++) ballastUV.push(u[i]);
+    g.dispose();
+
+    // Two rails: thin ribbons offset ±(gauge/2) from the centreline,
+    // lifted slightly above the ballast.
+    const gauge = w * 0.35;
+    for (const side of [-1, 1]) {
+      const rg = _buildRailLine(r.coords, side * gauge / 2, bb, elevGrid, gridN, vertExag);
+      const rp = rg.attributes.position.array;
+      for (let i = 0; i < rp.length; i++) railPos.push(rp[i]);
+      rg.dispose();
+    }
+  }
+
+  if (ballastPos.length) {
+    const bg = new THREE.BufferGeometry();
+    bg.setAttribute('position', new THREE.Float32BufferAttribute(ballastPos, 3));
+    bg.setAttribute('uv',       new THREE.Float32BufferAttribute(ballastUV, 2));
+    bg.computeVertexNormals();
+    const bm = new THREE.MeshLambertMaterial({ color: 0x5a5550, polygonOffset: true, polygonOffsetFactor: -1 });
+    bm.name = 'rail_ballast';
+    const bmesh = new THREE.Mesh(bg, bm);
+    bmesh.receiveShadow = true;
+    group.add(bmesh);
+  }
+  if (railPos.length) {
+    const rg = new THREE.BufferGeometry();
+    rg.setAttribute('position', new THREE.Float32BufferAttribute(railPos, 3));
+    rg.computeVertexNormals();
+    const rm = new THREE.MeshLambertMaterial({ color: 0xb8b4ae, polygonOffset: true, polygonOffsetFactor: -2 });
+    rm.name = 'rail_steel';
+    group.add(new THREE.Mesh(rg, rm));
+  }
+  return group;
+}
+
+// A single thin rail line offset `off` metres from the polyline centre,
+// lifted a touch above the ballast so it reads as a steel rail.
+function _buildRailLine(coords, off, bb, elevGrid, gridN, vertExag) {
+  const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
+  const pts = coords.map(c => ({ x: toLocalX(c.lon, bb), z: toLocalZ(c.lat, bb) }));
+  const RAIL_HALF = 0.18, LIFT = 0.85;
+  const positions = [];
+  const elevAt = (x, z) => getElevAt(elevGrid, gridN,
+    Math.max(0, Math.min(1, x / xSize)), Math.max(0, Math.min(1, z / zSize))) * vertExag + LIFT;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    let dx = b.x - a.x, dz = b.z - a.z;
+    const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+    const nx = -dz, nz = dx;             // perpendicular
+    // centreline shifted by `off`, then ±RAIL_HALF for the rail width
+    const ca = { x: a.x + nx * off, z: a.z + nz * off };
+    const cb = { x: b.x + nx * off, z: b.z + nz * off };
+    const al = { x: ca.x + nx * RAIL_HALF, z: ca.z + nz * RAIL_HALF };
+    const ar = { x: ca.x - nx * RAIL_HALF, z: ca.z - nz * RAIL_HALF };
+    const bl = { x: cb.x + nx * RAIL_HALF, z: cb.z + nz * RAIL_HALF };
+    const br = { x: cb.x - nx * RAIL_HALF, z: cb.z - nz * RAIL_HALF };
+    positions.push(al.x, elevAt(al.x, al.z), al.z,  br.x, elevAt(br.x, br.z), br.z,  ar.x, elevAt(ar.x, ar.z), ar.z);
+    positions.push(al.x, elevAt(al.x, al.z), al.z,  bl.x, elevAt(bl.x, bl.z), bl.z,  br.x, elevAt(br.x, br.z), br.z);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.computeVertexNormals();
+  return geo;
 }
 
 // ── Road geometry — flat ribbons hovering 0.5 m above the terrain ─────────
