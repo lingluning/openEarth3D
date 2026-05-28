@@ -8,6 +8,8 @@ async function fetchBuildings(bb) {
 (
   way["building"](${bb.s},${bb.w},${bb.n},${bb.e});
   relation["building"](${bb.s},${bb.w},${bb.n},${bb.e});
+  way["building:part"](${bb.s},${bb.w},${bb.n},${bb.e});
+  relation["building:part"](${bb.s},${bb.w},${bb.n},${bb.e});
 );
 out body;>;out skel qt;`;
   return _overpassJson(q);
@@ -166,58 +168,100 @@ function _resolveHeight(tags, areaM2) {
 function parseBuildings(elements, bb) {
   const nodeMap = {};
   elements.filter(e => e.type === 'node').forEach(n => { nodeMap[n.id] = n; });
-
-  // Lookup `way` elements by id so we can resolve simple multipolygon
-  // relation outers (complex donut-shaped buildings like train stations).
   const wayMap = {};
   elements.filter(e => e.type === 'way').forEach(w => { wayMap[w.id] = w; });
 
-  // Yield {tags, coords} for both standalone ways and the outer ring of
-  // a `type=multipolygon` building relation. Inner rings (holes) are
-  // skipped because our extruder doesn't model holes.
-  function* iterFootprints() {
-    for (const e of elements) {
-      if (!e.tags || !e.tags.building) continue;
-      // OSM `building=no` explicitly marks "this is not a building" — common
-      // on park outlines and parking lots — so we have to exclude it.
-      if (e.tags.building === 'no') continue;
+  const coordsOf = way => way.nodes
+    .map(id => nodeMap[id]).filter(Boolean)
+    .map(n => ({ lat: n.lat, lon: n.lon }));
 
-      if (e.type === 'way') {
-        yield { tags: e.tags, way: e };
-      } else if (e.type === 'relation' && e.tags.type === 'multipolygon' && e.members) {
-        // Pick the first `outer` member with resolvable nodes.
-        const outer = e.members.find(m => m.type === 'way' && m.role === 'outer' && wayMap[m.ref]);
-        if (outer) yield { tags: e.tags, way: wayMap[outer.ref] };
-      }
+  // Resolve the geometry way for an element: the way itself, or the outer
+  // ring of a type=multipolygon relation (donut buildings / stations).
+  function geomWay(e) {
+    if (e.type === 'way') return e;
+    if (e.type === 'relation' && e.tags.type === 'multipolygon' && e.members) {
+      const outer = e.members.find(m => m.type === 'way' && m.role === 'outer' && wayMap[m.ref]);
+      if (outer) return wayMap[outer.ref];
     }
+    return null;
   }
 
-  const buildings = [];
-  for (const { tags, way } of iterFootprints()) {
-    const coords = way.nodes
-      .map(id => nodeMap[id])
-      .filter(Boolean)
-      .map(n => ({ lat: n.lat, lon: n.lon }));
-    if (coords.length < 3) continue;
-
-    // Footprint area first — height inference for untagged buildings
-    // depends on it.
-    const area      = _footprintAreaM2(coords, bb);
-    // Squeeze every height hint OSM carries (units, building:height,
-    // est_height, levels+roof:levels) before inferring from type+area.
-    const height    = _resolveHeight(tags, area);
-    let   minH      = _parseLengthM(tags.min_height) || 0;
-    if (minH >= height) minH = 0; // a floating slab makes no sense; ignore
-
+  // Build the {coords, height, minH, roofH, roofShape, area, tags} record
+  // shared by both building outlines and building:part volumes.
+  function recordFrom(tags, coords) {
+    if (coords.length < 3) return null;
+    const area    = _footprintAreaM2(coords, bb);
+    const height  = _resolveHeight(tags, area);
+    let   minH    = _parseLengthM(tags.min_height) || 0;
+    if (minH >= height) minH = 0;
     const roofShape = _inferRoofShape(tags, area, height);
     const roofHTag  = _parseLengthM(tags['roof:height']);
     let   roofH     = roofHTag != null ? roofHTag : _inferRoofHeight(roofShape, height, area);
-    // Roof can't be taller than the building above its min_height base.
     roofH = Math.min(roofH, Math.max(0, height - minH - 2));
-
-    buildings.push({ coords, height, minH, roofH, roofShape, area, tags });
+    return { coords, height, minH, roofH, roofShape, area, tags };
   }
-  return buildings;
+
+  const outlines = [];   // building=*
+  const parts    = [];   // building:part=*  (the real 3D volumes)
+
+  for (const e of elements) {
+    if (!e.tags) continue;
+    const hasPart     = e.tags['building:part'] && e.tags['building:part'] !== 'no';
+    const hasBuilding = e.tags.building && e.tags.building !== 'no';
+
+    if (hasPart) {
+      const way = geomWay(e);
+      if (!way) continue;
+      // building:part volumes often lack a `building` type — fall back to
+      // the part value (e.g. "residential") as the type hint so height /
+      // roof / style inference still has something to work with.
+      const tags = e.tags.building ? e.tags
+        : Object.assign({}, e.tags, {
+            building: e.tags['building:part'] !== 'yes' ? e.tags['building:part'] : 'yes',
+          });
+      const rec = recordFrom(tags, coordsOf(way));
+      if (rec) parts.push(rec);
+    } else if (hasBuilding) {
+      const way = geomWay(e);
+      if (!way) continue;
+      const rec = recordFrom(e.tags, coordsOf(way));
+      if (rec) outlines.push(rec);
+    }
+  }
+
+  // Simple 3D Buildings rule: an outline covered by ≥1 part is REPLACED by
+  // its parts — we must not extrude the outline box on top of the detailed
+  // volumes. Associate parts → outlines by centroid containment, with an
+  // AABB pre-reject so this stays fast on dense city blocks.
+  for (const o of outlines) {
+    o._local = o.coords.map(c => ({ x: toLocalX(c.lon, bb), z: toLocalZ(c.lat, bb) }));
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const p of o._local) {
+      if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+      if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+    }
+    o._aabb = { minX, maxX, minZ, maxZ };
+  }
+  for (const p of parts) {
+    const lc = p.coords.map(c => ({ x: toLocalX(c.lon, bb), z: toLocalZ(c.lat, bb) }));
+    const cx = lc.reduce((s, q) => s + q.x, 0) / lc.length;
+    const cz = lc.reduce((s, q) => s + q.z, 0) / lc.length;
+    for (const o of outlines) {
+      if (o._hasParts) continue;
+      const a = o._aabb;
+      if (cx < a.minX || cx > a.maxX || cz < a.minZ || cz > a.maxZ) continue;
+      if (_ptInPoly2d(cx, cz, o._local)) { o._hasParts = true; break; }
+    }
+  }
+
+  // Final render list: every part + every outline that has no parts.
+  const result = parts;
+  for (const o of outlines) {
+    if (o._hasParts) continue;
+    delete o._local; delete o._aabb;
+    result.push(o);
+  }
+  return result;
 }
 
 // ── Per-building variety ────────────────────────────────────────────────
