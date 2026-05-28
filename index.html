@@ -58,12 +58,37 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 .legend{display:flex;flex-direction:column;gap:4px}
 .legend-item{display:flex;align-items:center;gap:6px;font-size:0.76rem;color:#b0c4de}
 .legend-dot{width:12px;height:12px;border-radius:2px;flex-shrink:0}
+
+/* Hamburger toggle — hidden on desktop, shown on narrow screens. */
+#menuToggle{display:none;background:#0f3460;border:1px solid #4fc3f7;color:#4fc3f7;
+  border-radius:6px;padding:4px 10px;font-size:1.1rem;cursor:pointer;margin-left:auto}
+
+/* ── Mobile / narrow layout ─────────────────────────────────────────────
+   Below 760px the side panel becomes a slide-in drawer over the 3D view
+   instead of stealing horizontal space, and the canvas goes full-width. */
+@media (max-width: 760px) {
+  #main{position:relative}
+  #sidebar{
+    position:absolute;top:0;left:0;bottom:0;z-index:1000;
+    width:84%;max-width:320px;
+    transform:translateX(-102%);
+    transition:transform .25s ease;
+    box-shadow:2px 0 16px rgba(0,0,0,.5);
+  }
+  body.menu-open #sidebar{transform:translateX(0)}
+  #menuToggle{display:block}
+  #header h1{font-size:0.95rem}
+  #header h1 span{display:none}
+  .hint{font-size:0.62rem;bottom:6px;right:8px}
+  #buildingInfo{top:8px;right:8px;font-size:0.74rem;max-width:180px}
+}
 </style>
 </head>
 <body>
 
 <div id="header">
   <h1>openEarth3D <span>— 3D City Viewer</span></h1>
+  <button id="menuToggle" aria-label="メニュー">☰</button>
 </div>
 
 <div id="main">

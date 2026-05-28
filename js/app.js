@@ -450,7 +450,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (isFinite(lat) && isFinite(lon)) setCenter(lat, lon);
   }
 
-  document.getElementById('runBtn').addEventListener('click', run);
+  document.getElementById('runBtn').addEventListener('click', () => {
+    // On mobile the sidebar is a drawer over the view — close it so the
+    // user sees the result after hitting generate.
+    document.body.classList.remove('menu-open');
+    run();
+  });
+
+  // Hamburger drawer toggle (mobile only; the button is display:none on
+  // desktop via CSS).
+  const menuToggle = document.getElementById('menuToggle');
+  if (menuToggle) menuToggle.addEventListener('click', () =>
+    document.body.classList.toggle('menu-open'));
 
   // Share — copy a reproducible URL to the clipboard.
   document.getElementById('shareBtn').addEventListener('click', async () => {
