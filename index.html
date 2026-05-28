@@ -190,6 +190,10 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
       </select>
       <button id="exportBtn" disabled style="background:#0f3460;border:1px solid #4fc3f7;color:#4fc3f7;padding:7px 12px;border-radius:6px;font-size:0.85rem;font-weight:600;cursor:pointer;opacity:.5;white-space:nowrap">⬇️ 保存</button>
     </div>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button id="shareBtn" disabled style="flex:1;background:#0f3460;border:1px solid #4fc3f7;color:#4fc3f7;padding:6px;border-radius:6px;font-size:0.8rem;cursor:pointer;opacity:.5">🔗 共有URL</button>
+      <button id="shotBtn" disabled style="flex:1;background:#0f3460;border:1px solid #4fc3f7;color:#4fc3f7;padding:6px;border-radius:6px;font-size:0.8rem;cursor:pointer;opacity:.5">📷 スクショ</button>
+    </div>
 
     <div class="card">
       <h3>建物の凡例</h3>
@@ -228,8 +232,10 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
     <canvas id="glCanvas"></canvas>
     <div class="hint">
       左ドラッグ: 回転 &nbsp;|&nbsp; 右ドラッグ/中ドラッグ: 移動<br>
-      スクロール: ズーム &nbsp;|&nbsp; データ: 国土地理院・OpenStreetMap
+      スクロール: ズーム &nbsp;|&nbsp; 建物クリック: 情報表示<br>
+      データ: 国土地理院・OpenStreetMap
     </div>
+    <div id="buildingInfo" style="display:none;position:absolute;top:14px;right:14px;background:rgba(16,24,50,0.94);border:1px solid #4fc3f7;border-radius:8px;padding:10px 14px;color:#e0e0f0;font-size:0.8rem;line-height:1.6;max-width:220px;z-index:998;cursor:pointer;backdrop-filter:blur(8px)"></div>
   </div>
 </div>
 

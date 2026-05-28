@@ -11,6 +11,9 @@ const LS_KEY     = 'openearth3d:lastInputs';
 
 let leafletMap, leafletMarker;
 let currentTerrain = null, currentBuildings = null;
+// Kept for click-to-inspect: the parsed OSM building array + the bbox they
+// were built in, so a raycast hit can be matched back to a footprint.
+let currentBuildingData = null, currentBB = null;
 
 function initMap() {
   leafletMap = L.map('minimap').setView([35.6812, 139.7671], 13);
@@ -172,11 +175,119 @@ function validateCustomAerialJson() {
 }
 
 function setExportEnabled(enabled) {
-  for (const id of ['exportBtn', 'exportFormat']) {
+  for (const id of ['exportBtn', 'exportFormat', 'shareBtn', 'shotBtn']) {
     const el = document.getElementById(id);
+    if (!el) continue;
     el.disabled = !enabled;
     el.style.opacity = enabled ? '1' : '.5';
   }
+}
+
+// ── Share URL ────────────────────────────────────────────────────────────
+// Encode the current location + settings into the URL hash so a link
+// reproduces the exact view. Hash (not query) keeps it client-side only.
+function buildShareUrl() {
+  const g = id => (document.getElementById(id) || {}).value;
+  const p = new URLSearchParams({
+    lat: g('latInput'), lon: g('lonInput'), km: g('rangeKm'),
+    mesh: g('meshDetail'), src: g('photoSource'), tex: g('textureQuality'),
+    exag: g('vertExag'),
+    bldg: document.getElementById('toggleBuildings').checked ? '1' : '0',
+    plateau: document.getElementById('togglePlateau').checked ? '1' : '0',
+  });
+  return location.origin + location.pathname + '#' + p.toString();
+}
+
+// Apply settings from the URL hash on load. Returns true if anything was
+// applied (so we know to skip the localStorage restore / could auto-run).
+function applyHashState() {
+  if (!location.hash || location.hash.length < 2) return false;
+  const p = new URLSearchParams(location.hash.slice(1));
+  const set = (id, key) => { const v = p.get(key); if (v != null && document.getElementById(id)) document.getElementById(id).value = v; };
+  set('latInput', 'lat'); set('lonInput', 'lon'); set('rangeKm', 'km');
+  set('meshDetail', 'mesh'); set('photoSource', 'src');
+  set('textureQuality', 'tex'); set('vertExag', 'exag');
+  if (p.get('bldg') != null) document.getElementById('toggleBuildings').checked = p.get('bldg') === '1';
+  if (p.get('plateau') != null) document.getElementById('togglePlateau').checked = p.get('plateau') === '1';
+  if (p.get('km')) document.getElementById('kmLabel').textContent = parseFloat(p.get('km')).toFixed(1) + ' km';
+  if (p.get('exag')) document.getElementById('exagLabel').textContent = parseFloat(p.get('exag')).toFixed(1) + 'x';
+  return p.has('lat') && p.has('lon');
+}
+
+// ── Click-to-inspect ─────────────────────────────────────────────────────
+// Raycast the merged building meshes; match the world hit point back to an
+// OSM footprint (point-in-polygon in local metres) to show its tags.
+function _ptInPolyLocal(x, z, coordsLocal) {
+  let inside = false;
+  for (let i = 0, j = coordsLocal.length - 1; i < coordsLocal.length; j = i++) {
+    const xi = coordsLocal[i].x, zi = coordsLocal[i].z;
+    const xj = coordsLocal[j].x, zj = coordsLocal[j].z;
+    if (((zi > z) !== (zj > z)) &&
+        (x < (xj - xi) * (z - zi) / (zj - zi + 1e-9) + xi)) inside = !inside;
+  }
+  return inside;
+}
+
+function pickBuildingInfo(clientX, clientY) {
+  if (!currentBuildings || !currentBuildingData || !currentBB) return null;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1
+  );
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, camera);
+  const hits = ray.intersectObject(currentBuildings, true);
+  if (hits.length === 0) return null;
+  const hx = hits[0].point.x, hz = hits[0].point.z;
+
+  // Find the footprint that contains (or is nearest to) the hit point.
+  let best = null, bestDist = Infinity;
+  for (const b of currentBuildingData) {
+    const local = b.coords.map(c => ({ x: toLocalX(c.lon, currentBB), z: toLocalZ(c.lat, currentBB) }));
+    if (_ptInPolyLocal(hx, hz, local)) return { b, point: hits[0].point };
+    // boundary fallback: track nearest centroid
+    const cx = local.reduce((s, p) => s + p.x, 0) / local.length;
+    const cz = local.reduce((s, p) => s + p.z, 0) / local.length;
+    const d = (cx - hx) ** 2 + (cz - hz) ** 2;
+    if (d < bestDist) { bestDist = d; best = b; }
+  }
+  // Accept the nearest footprint only if the hit is plausibly on it (<8 m).
+  return (best && bestDist < 64) ? { b: best, point: hits[0].point } : null;
+}
+
+function showBuildingInfo(info) {
+  const panel = document.getElementById('buildingInfo');
+  if (!panel) return;
+  if (!info) { panel.style.display = 'none'; return; }
+  const t = info.b.tags || {};
+  const name = t.name || t['name:en'] || t['name:ja'] || '(無名)';
+  const type = t.building && t.building !== 'yes' ? t.building : '建物';
+  const rows = [
+    `<b>${name}</b>`,
+    `種別: ${type}`,
+    `高さ: ${info.b.height.toFixed(1)} m`,
+    `屋根: ${info.b.roofShape}`,
+    `床面積: ${Math.round(info.b.area)} m²`,
+  ];
+  if (t['building:levels']) rows.push(`階数: ${t['building:levels']}`);
+  panel.innerHTML = rows.join('<br>') +
+    '<br><span style="color:#7a9ab8;font-size:0.68rem">クリックで閉じる</span>';
+  panel.style.display = 'block';
+}
+
+// ── Screenshot ────────────────────────────────────────────────────────────
+function downloadScreenshot() {
+  // Force one fresh render so the framebuffer is populated, then read it.
+  if (composer) composer.render(); else renderer.render(scene, camera);
+  renderer.domElement.toBlob(blob => {
+    if (!blob) { showError('スクリーンショット失敗'); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `openEarth3D_${Date.now()}.png`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }, 'image/png');
 }
 
 async function run() {
@@ -238,6 +349,8 @@ async function run() {
   scene.add(currentTerrain);
   placeCameraOverTerrain(elevGrid, meshN, xSize, zSize, vertExag);
   currentBuildings = null;
+  currentBuildingData = null;   // PLATEAU path leaves this null (no footprints)
+  currentBB = bb;
 
   // ── Step 4: buildings + ground features ────────────────────────────────
   // Two parallel paths for buildings:
@@ -299,6 +412,8 @@ async function run() {
         setProgress(0.88, '建物3D生成中（OSM）…');
         const parsed = parseBuildings(bElems, bb);
         currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag);
+        currentBuildingData = parsed;   // for click-to-inspect
+        currentBB = bb;
         scene.add(currentBuildings);
         const failNote = (bRes.status === 'rejected' || gRes.status === 'rejected')
           ? ' ⚠️ 一部のOSMデータ取得失敗' : '';
@@ -324,8 +439,43 @@ document.addEventListener('DOMContentLoaded', () => {
   initScene(document.getElementById('glCanvas'));
   initMap();
   restoreInputs();
+  // A share-link hash overrides the saved localStorage state.
+  const fromHash = applyHashState();
+  if (fromHash) {
+    const lat = parseFloat(document.getElementById('latInput').value);
+    const lon = parseFloat(document.getElementById('lonInput').value);
+    if (isFinite(lat) && isFinite(lon)) setCenter(lat, lon);
+  }
 
   document.getElementById('runBtn').addEventListener('click', run);
+
+  // Share — copy a reproducible URL to the clipboard.
+  document.getElementById('shareBtn').addEventListener('click', async () => {
+    const url = buildShareUrl();
+    history.replaceState(null, '', url);  // reflect in the address bar too
+    try {
+      await navigator.clipboard.writeText(url);
+      showError('🔗 共有URLをクリップボードにコピーしました');
+    } catch {
+      showError('URL をアドレスバーに反映しました（コピー権限なし）');
+    }
+  });
+
+  // Screenshot — download the current canvas as PNG.
+  document.getElementById('shotBtn').addEventListener('click', downloadScreenshot);
+
+  // Click-to-inspect on the 3D canvas. A small drag = orbit (ignore);
+  // a click = inspect. Track pointer movement to tell them apart.
+  const canvas = document.getElementById('glCanvas');
+  let downX = 0, downY = 0;
+  canvas.addEventListener('pointerdown', e => { downX = e.clientX; downY = e.clientY; });
+  canvas.addEventListener('pointerup', e => {
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) return; // was a drag
+    const info = pickBuildingInfo(e.clientX, e.clientY);
+    showBuildingInfo(info);
+  });
+  // Click the info panel to dismiss it.
+  document.getElementById('buildingInfo').addEventListener('click', () => showBuildingInfo(null));
 
   document.getElementById('exportBtn').addEventListener('click', async () => {
     const btn = document.getElementById('exportBtn');

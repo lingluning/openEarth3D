@@ -6,7 +6,9 @@ let hemiLight, composer;
 let _currentHour = 13.5;
 
 function initScene(canvas) {
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  // preserveDrawingBuffer lets downloadScreenshot() read the canvas after
+  // a render without the framebuffer being cleared first.
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   // SketchUp-style: no shadows, no tone mapping, no PBR. Keeps the image
   // clean and graphic instead of photoreal.
