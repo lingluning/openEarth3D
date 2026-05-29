@@ -175,20 +175,26 @@ function parseBuildings(elements, bb) {
     .map(id => nodeMap[id]).filter(Boolean)
     .map(n => ({ lat: n.lat, lon: n.lon }));
 
-  // Resolve the geometry way for an element: the way itself, or the outer
-  // ring of a type=multipolygon relation (donut buildings / stations).
-  function geomWay(e) {
-    if (e.type === 'way') return e;
+  // Resolve the geometry rings for an element: the way itself (no holes), or
+  // the outer ring + inner rings of a type=multipolygon relation (donut
+  // buildings / stations with courtyards).
+  function geomRings(e) {
+    if (e.type === 'way') return { outer: coordsOf(e), holes: [] };
     if (e.type === 'relation' && e.tags.type === 'multipolygon' && e.members) {
       const outer = e.members.find(m => m.type === 'way' && m.role === 'outer' && wayMap[m.ref]);
-      if (outer) return wayMap[outer.ref];
+      if (!outer) return null;
+      const holes = e.members
+        .filter(m => m.type === 'way' && m.role === 'inner' && wayMap[m.ref])
+        .map(m => coordsOf(wayMap[m.ref]))
+        .filter(h => h.length >= 3);
+      return { outer: coordsOf(wayMap[outer.ref]), holes };
     }
     return null;
   }
 
-  // Build the {coords, height, minH, roofH, roofShape, area, tags} record
-  // shared by both building outlines and building:part volumes.
-  function recordFrom(tags, coords) {
+  // Build the {coords, holes, height, minH, roofH, roofShape, area, tags}
+  // record shared by both building outlines and building:part volumes.
+  function recordFrom(tags, coords, holes) {
     if (coords.length < 3) return null;
     const area    = _footprintAreaM2(coords, bb);
     const height  = _resolveHeight(tags, area);
@@ -198,7 +204,7 @@ function parseBuildings(elements, bb) {
     const roofHTag  = _parseLengthM(tags['roof:height']);
     let   roofH     = roofHTag != null ? roofHTag : _inferRoofHeight(roofShape, height, area);
     roofH = Math.min(roofH, Math.max(0, height - minH - 2));
-    return { coords, height, minH, roofH, roofShape, area, tags };
+    return { coords, holes: holes || [], height, minH, roofH, roofShape, area, tags };
   }
 
   const outlines = [];   // building=*
@@ -210,8 +216,8 @@ function parseBuildings(elements, bb) {
     const hasBuilding = e.tags.building && e.tags.building !== 'no';
 
     if (hasPart) {
-      const way = geomWay(e);
-      if (!way) continue;
+      const rings = geomRings(e);
+      if (!rings) continue;
       // building:part volumes often lack a `building` type — fall back to
       // the part value (e.g. "residential") as the type hint so height /
       // roof / style inference still has something to work with.
@@ -219,12 +225,12 @@ function parseBuildings(elements, bb) {
         : Object.assign({}, e.tags, {
             building: e.tags['building:part'] !== 'yes' ? e.tags['building:part'] : 'yes',
           });
-      const rec = recordFrom(tags, coordsOf(way));
+      const rec = recordFrom(tags, rings.outer, rings.holes);
       if (rec) parts.push(rec);
     } else if (hasBuilding) {
-      const way = geomWay(e);
-      if (!way) continue;
-      const rec = recordFrom(e.tags, coordsOf(way));
+      const rings = geomRings(e);
+      if (!rings) continue;
+      const rec = recordFrom(e.tags, rings.outer, rings.holes);
       if (rec) outlines.push(rec);
     }
   }
@@ -648,15 +654,16 @@ function resetBuildingCaches() {
   _roofEquipMat = null;  // disposed by clearSceneObjects; rebuild next run
 }
 
-function _getWallMat(style, bucket = 0) {
+function _getWallMat(style, bucket = 0, doubleSide = false) {
   const off = HSL_OFFSETS[bucket % STYLE_VARIANTS];
   const wallHex = _jitterHexHSL(style.wall, off.dh, off.ds, off.dl);
-  const key = `${wallHex.toString(16)}_${style.type}_${bucket}`;
+  const key = `${wallHex.toString(16)}_${style.type}_${bucket}${doubleSide ? '_ds' : ''}`;
   if (_matCache.wall[key]) return _matCache.wall[key];
   const tex = makeFacadeTexture(wallHex, style.type, bucket);
   // Cartoon style: Lambert reads the hemi gradient but has no specular
-  // or env reflections.
-  const mat = new THREE.MeshLambertMaterial({ map: tex });
+  // or env reflections. Courtyard (inner-ring) walls use DoubleSide so they
+  // stay visible regardless of the hole ring's winding.
+  const mat = new THREE.MeshLambertMaterial({ map: tex, side: doubleSide ? THREE.DoubleSide : THREE.FrontSide });
   mat.name = `wall_${key}`;
   _matCache.wall[key] = mat;
   return mat;
@@ -745,9 +752,16 @@ function _isConvex(pts) {
   return true;
 }
 
-function _makeFlatRoofGeo(footprint, y) {
+function _makeFlatRoofGeo(footprint, y, holes) {
   // Triangulate via THREE.Shape so non-convex footprints work too.
   const shape = new THREE.Shape(footprint.map(p => new THREE.Vector2(p.x, -p.z)));
+  // Cut courtyards / inner rings so the roof reads as a donut, not a slab.
+  if (Array.isArray(holes)) {
+    for (const h of holes) {
+      if (h.length < 3) continue;
+      shape.holes.push(new THREE.Path(h.map(p => new THREE.Vector2(p.x, -p.z))));
+    }
+  }
   const geo = new THREE.ShapeGeometry(shape);
   geo.rotateX(-Math.PI / 2);
   geo.translate(0, y, 0);
@@ -870,10 +884,10 @@ function _makeGabledRoofGeo(footprint, baseY, topY) {
   return _addRoofUVs(geo);
 }
 
-function _makeRoofGeo(shape, footprint, baseY, topY) {
-  if (topY <= baseY + 0.01) return _makeFlatRoofGeo(footprint, baseY);
+function _makeRoofGeo(shape, footprint, baseY, topY, holes) {
+  if (topY <= baseY + 0.01) return _makeFlatRoofGeo(footprint, baseY, holes);
   switch (shape) {
-    case 'flat':       return _makeFlatRoofGeo(footprint, baseY);
+    case 'flat':       return _makeFlatRoofGeo(footprint, baseY, holes);
     case 'pyramidal':
     case 'hipped':
     case 'hip':        return _makePyramidalRoofGeo(footprint, baseY, topY);
@@ -923,7 +937,7 @@ function _emitBox(P, cx, cz, bx, bz, by, y0) {
   P.push(xr,y0,zb, xr,y1,zf, xr,y0,zf,  xr,y0,zb, xr,y1,zb, xr,y1,zf); // east +X
 }
 
-function _emitRoofEquipment(out, footprint, roofY, bucket, areaM2) {
+function _emitRoofEquipment(out, footprint, roofY, bucket, areaM2, holes) {
   const rng = _seededRng((bucket * 0x2f1b + 911) >>> 0);
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (const p of footprint) {
@@ -939,6 +953,8 @@ function _emitRoofEquipment(out, footprint, roofY, bucket, areaM2) {
     const x = minX + rng() * (maxX - minX);
     const z = minZ + rng() * (maxZ - minZ);
     if (!_ptInPoly2d(x, z, footprint)) continue;
+    // Don't drop equipment over an open courtyard.
+    if (holes && holes.some(h => _ptInPoly2d(x, z, h))) continue;
     const bx = 1 + rng() * 2;    // 1-3 m
     const bz = 1 + rng() * 2;
     const by = 1 + rng() * 1.5;  // 1-2.5 m
@@ -985,11 +1001,19 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   const minH  = building.minH;
   const totalH = building.height;
 
-  // Fan-triangulated pitched roofs need a convex footprint — demote
-  // non-convex (L/U/T) to flat so they reach full height without holes.
+  // Inner rings (courtyards) in local XZ. A building with holes can't use a
+  // fan-triangulated pitched roof, so we demote it to flat below.
+  const holesLocal = (building.holes || [])
+    .map(h => h.map(c => ({ x: toLocalX(c.lon, bb), z: toLocalZ(c.lat, bb) })))
+    .filter(h => h.length >= 3);
+  const hasHoles = holesLocal.length > 0;
+
+  // Fan-triangulated pitched roofs need a convex, hole-free footprint —
+  // demote non-convex (L/U/T) or holed footprints to flat so they reach
+  // full height without holes / gaps.
   let roofShape = building.roofShape;
   let roofH     = building.roofH;
-  if (roofShape !== 'flat' && roofShape !== 'dome' && !_isConvex(pts2d)) {
+  if (roofShape !== 'flat' && roofShape !== 'dome' && (hasHoles || !_isConvex(pts2d))) {
     roofShape = 'flat';
     roofH = 0;
   }
@@ -1012,22 +1036,33 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   out.push({ geometry: _makeWallsGeo(pts2d, groundTopY, wallTop),
              material: _getWallMat(style, bucket) });
 
+  // Courtyard (inner-ring) walls — full height, DoubleSide so they read from
+  // any angle regardless of the hole ring's winding.
+  for (const h of holesLocal) {
+    out.push({ geometry: _makeWallsGeo(h, baseY, wallTop),
+               material: _getWallMat(style, bucket, true) });
+  }
+
   const pitched = roofShape !== 'flat' && roofH > 0.5;
-  out.push({ geometry: _makeRoofGeo(roofShape, pts2d, wallTop, roofTop),
+  out.push({ geometry: _makeRoofGeo(roofShape, pts2d, wallTop, roofTop, holesLocal),
              material: _getRoofMat(style, pitched, bucket) });
 
-  // Parapet on tall flat roofs.
+  // Parapet on tall flat roofs. The cap is the visible roof deck, so rooftop
+  // equipment is placed on top of it (not at wallTop, where the cap would
+  // bury it).
+  let roofDeckY = wallTop;
   if (roofShape === 'flat' && totalH >= 6 && building.area >= 25) {
     const parapetH = Math.min(1.0, 0.4 + totalH * 0.012);
     out.push({ geometry: _makeWallsGeo(pts2d, wallTop, wallTop + parapetH),
                material: _getWallMat(style, bucket) });
-    out.push({ geometry: _makeFlatRoofGeo(pts2d, wallTop + parapetH),
+    out.push({ geometry: _makeFlatRoofGeo(pts2d, wallTop + parapetH, holesLocal),
                material: _getRoofMat(style, false, bucket) });
+    roofDeckY = wallTop + parapetH;
   }
 
   // Rooftop equipment (HVAC / water tank / stairwell box) on flat roofs.
   if (roofShape === 'flat' && totalH >= 9 && building.area >= 120) {
-    _emitRoofEquipment(out, pts2d, wallTop, bucket, building.area);
+    _emitRoofEquipment(out, pts2d, roofDeckY, bucket, building.area, holesLocal);
   }
 }
 

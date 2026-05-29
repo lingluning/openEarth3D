@@ -61,6 +61,14 @@ const VEGETATION_DENSITY = {
 function parseGroundFeatures(elements, bb) {
   const nodeMap = {};
   elements.filter(e => e.type === 'node').forEach(n => { nodeMap[n.id] = n; });
+  // wayMap lets us resolve the member ways of a multipolygon water relation —
+  // big lakes / rivers / reservoirs carry their tags on the *relation*, with
+  // untagged member ways, so without this they were silently dropped.
+  const wayMap = {};
+  elements.filter(e => e.type === 'way').forEach(w => { wayMap[w.id] = w; });
+  const coordsOf = way => (way.nodes || [])
+    .map(id => nodeMap[id]).filter(Boolean)
+    .map(n => ({ lat: n.lat, lon: n.lon }));
 
   const roads = [], waters = [], forests = [], trees = [], bridges = [], rails = [];
 
@@ -112,6 +120,21 @@ function parseGroundFeatures(elements, bb) {
       }
     } else if (e.type === 'node' && e.tags && e.tags.natural === 'tree') {
       trees.push({ lat: e.lat, lon: e.lon });
+    } else if (e.type === 'relation' && e.tags &&
+               (e.tags.natural === 'water' || e.tags.water || e.tags.waterway === 'riverbank') &&
+               Array.isArray(e.members)) {
+      // Multipolygon water body. We do the common single-way-per-ring case:
+      // each `outer` member becomes a polygon, every `inner` member a hole.
+      // (Full ring assembly across split ways is out of scope.)
+      const inners = e.members
+        .filter(m => m.type === 'way' && m.role === 'inner' && wayMap[m.ref])
+        .map(m => coordsOf(wayMap[m.ref]))
+        .filter(h => h.length >= 3);
+      for (const m of e.members) {
+        if (m.type !== 'way' || m.role !== 'outer' || !wayMap[m.ref]) continue;
+        const oc = coordsOf(wayMap[m.ref]);
+        if (oc.length >= 3) waters.push({ coords: oc, holes: inners });
+      }
     }
   }
   return { roads, waters, forests, trees, bridges, rails };
@@ -514,6 +537,14 @@ function createWater(waters, bb, elevGrid, gridN, vertExag) {
     ));
     if (pts.length < 3) continue;
     const shape = new THREE.Shape(pts);
+    // Inner rings (islands / dry holes inside a water multipolygon).
+    if (Array.isArray(w.holes)) {
+      for (const h of w.holes) {
+        if (h.length < 3) continue;
+        shape.holes.push(new THREE.Path(h.map(c => new THREE.Vector2(
+          toLocalX(c.lon, bb), -toLocalZ(c.lat, bb)))));
+      }
+    }
     const geo = new THREE.ShapeGeometry(shape);
     geo.rotateX(-Math.PI / 2);
 

@@ -63,14 +63,19 @@ async function fetchPlateauTilesetUrl(cityCode) {
     }
   }`;
   const ctrl = new AbortController();
-  setTimeout(() => ctrl.abort(), 8000);
-  const res = await fetch('https://api.plateauview.mlit.go.jp/datacatalog/graphql', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
-    signal: ctrl.signal,
-  });
-  const json = await res.json();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  let json;
+  try {
+    const res = await fetch('https://api.plateauview.mlit.go.jp/datacatalog/graphql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+      signal: ctrl.signal,
+    });
+    json = await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
   const all = (json?.data?.datasets?.items || []).flatMap(d => d.items || []);
   const bldg = all.filter(i => i.url && i.url.includes('bldg') && i.url.endsWith('tileset.json'));
   if (bldg.length === 0) return null;
