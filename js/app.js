@@ -41,12 +41,33 @@ function showProgress(v) {
 }
 
 // Show a transient error in the progress label instead of a blocking alert.
+// The label lives inside #progressWrap which is display:none outside a run,
+// so force the wrap visible — otherwise errors fired from idle-state buttons
+// (invalid lat/lon, geolocation denied, export/share failures) are silent.
 function showError(msg) {
+  showProgress(true);
   const label = document.getElementById('progressLabel');
   if (label) {
     label.textContent = '❌ ' + msg;
     label.style.color = '#ff8a8a';
-    setTimeout(() => { label.style.color = ''; }, 6000);
+    setTimeout(() => {
+      label.style.color = '';
+      // Only auto-hide if no run is in flight (run() manages it otherwise).
+      if (document.getElementById('runBtn').disabled === false) showProgress(false);
+    }, 6000);
+  }
+}
+
+// Non-error sibling of showError for success/status toasts (share copied,
+// screenshot saved, …) — same surfacing, no ❌ and no red.
+function showStatus(msg) {
+  showProgress(true);
+  const label = document.getElementById('progressLabel');
+  if (label) {
+    label.textContent = msg;
+    setTimeout(() => {
+      if (document.getElementById('runBtn').disabled === false) showProgress(false);
+    }, 4000);
   }
 }
 
@@ -209,8 +230,13 @@ function applyHashState() {
   set('textureQuality', 'tex'); set('vertExag', 'exag');
   if (p.get('bldg') != null) document.getElementById('toggleBuildings').checked = p.get('bldg') === '1';
   if (p.get('plateau') != null) document.getElementById('togglePlateau').checked = p.get('plateau') === '1';
-  if (p.get('km')) document.getElementById('kmLabel').textContent = parseFloat(p.get('km')).toFixed(1) + ' km';
-  if (p.get('exag')) document.getElementById('exagLabel').textContent = parseFloat(p.get('exag')).toFixed(1) + 'x';
+  // Labels must reflect what the range input ACTUALLY accepted — a
+  // malformed hash (#km=abc) is rejected by the input element but
+  // parseFloat(p.get(...)) would still render "NaN km".
+  document.getElementById('kmLabel').textContent =
+    parseFloat(document.getElementById('rangeKm').value).toFixed(1) + ' km';
+  document.getElementById('exagLabel').textContent =
+    parseFloat(document.getElementById('vertExag').value).toFixed(1) + 'x';
   return p.has('lat') && p.has('lon');
 }
 
@@ -308,14 +334,23 @@ async function run() {
   // slopes twice as steeply as the buildings' base plane and they no longer
   // sit flush. When we're inside a PLATEAU city with the toggle on, force
   // true scale (1×) so terrain + LOD2 buildings share one vertical metric.
-  const willTryPlateau = usePlateau && findPlateauCities(lat, lon).length > 0;
+  // Buildings off ⇒ nothing to keep flush ⇒ honour the user's slider.
+  const willTryPlateau = usePlateau && showBuildings
+    && findPlateauCities(lat, lon).length > 0;
   const vertExag = willTryPlateau ? 1.0 : vertExagInput;
 
   if (isNaN(lat) || isNaN(lon)) { showError('緯度経度を入力してください'); return; }
 
   persistInputs();
   document.getElementById('runBtn').disabled = true;
+  setExportEnabled(false);   // stale-scene export during the rebuild = partial ZIP
   showProgress(true);
+
+  // Everything below runs inside try/finally: any uncaught throw (WebGL
+  // context loss during texture upload, a geometry bug…) used to leave
+  // runBtn disabled forever with the progress bar frozen — page reload
+  // was the only way out.
+  try {
 
   const bb = bboxFromCenter(lat, lon, km);
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
@@ -329,7 +364,6 @@ async function run() {
     });
   } catch (e) {
     showError('地形取得失敗: ' + e.message);
-    document.getElementById('runBtn').disabled = false;
     return;
   }
   // elevGrid.length === meshN (kept here only as a sanity guard if the
@@ -346,7 +380,6 @@ async function run() {
     }, { mode: photoSrc, customs: customAerials, maxTextureEdge });
   } catch (e) {
     showError('航空写真取得失敗: ' + e.message);
-    document.getElementById('runBtn').disabled = false;
     return;
   }
 
@@ -531,10 +564,19 @@ async function run() {
     }
   }
 
-  setProgress(1.0, '完了');
-  setTimeout(() => showProgress(false), 1000);
-  document.getElementById('runBtn').disabled = false;
+  // Fill the bar but KEEP the last label — it's the only place that tells
+  // the user whether they got PLATEAU or OSM (and any ⚠️ partial-failure
+  // note). Overwriting it with 完了 in the same tick made it unreadable.
+  document.getElementById('progressBar').style.width = '100%';
+  setTimeout(() => showProgress(false), 4000);
   setExportEnabled(true);
+
+  } catch (e) {
+    console.error('run() failed:', e);
+    showError('生成失敗: ' + (e.message || e));
+  } finally {
+    document.getElementById('runBtn').disabled = false;
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -568,9 +610,9 @@ document.addEventListener('DOMContentLoaded', () => {
     history.replaceState(null, '', url);  // reflect in the address bar too
     try {
       await navigator.clipboard.writeText(url);
-      showError('🔗 共有URLをクリップボードにコピーしました');
+      showStatus('🔗 共有URLをクリップボードにコピーしました');
     } catch {
-      showError('URL をアドレスバーに反映しました（コピー権限なし）');
+      showStatus('URL をアドレスバーに反映しました（コピー権限なし）');
     }
   });
 

@@ -663,13 +663,19 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
 
   // GLTFLoader + DRACOLoader. PLATEAU's LOD2 glb tiles use Draco mesh
   // compression — without this every loader.parse() throws "No DRACOLoader
-  // instance provided" and we render nothing.
+  // instance provided" and we render nothing. The DRACOLoader is a
+  // module-level singleton: each instance spins up a decoder worker pool
+  // that is never disposed, so a fresh one per run leaked workers on
+  // every regenerate.
   const loader = new THREE.GLTFLoader();
   if (typeof THREE.DRACOLoader === 'function') {
-    const draco = new THREE.DRACOLoader();
-    draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/draco/');
-    draco.setDecoderConfig({ type: 'js' });   // wasm decoder needs CORS+headers we don't have; js works everywhere
-    loader.setDRACOLoader(draco);
+    if (!loadPlateauBuildings._draco) {
+      const draco = new THREE.DRACOLoader();
+      draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/draco/');
+      draco.setDecoderConfig({ type: 'js' });   // wasm decoder needs CORS+headers we don't have; js works everywhere
+      loadPlateauBuildings._draco = draco;
+    }
+    loader.setDRACOLoader(loadPlateauBuildings._draco);
   } else {
     console.warn('[PLATEAU] DRACOLoader script not loaded — LOD2 tiles will fail');
   }

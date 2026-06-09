@@ -42,8 +42,13 @@ async function _overpassJson(query) {
         const snippet = (await res.text()).slice(0, 120).replace(/\s+/g, ' ').trim();
         lastErr = new Error(`Overpass ${res.status}: ${snippet || res.statusText}`);
         // 429 / 504 → try the next mirror after a tiny pause. Other 4xx
-        // are usually our fault (bad query) so retrying won't help.
-        if (res.status !== 429 && res.status !== 504 && res.status !== 503) throw lastErr;
+        // are usually our fault (bad query) so retrying won't help —
+        // mark fatal so our own catch below rethrows instead of cycling
+        // through every mirror with the same doomed query.
+        if (res.status !== 429 && res.status !== 504 && res.status !== 503) {
+          lastErr.fatal = true;
+          throw lastErr;
+        }
         console.warn(`Overpass ${url} → ${res.status}, trying next mirror`);
         await new Promise(r => setTimeout(r, 400 + attempt * 600));   // 0.4, 1.0, 1.6 s
         continue;
@@ -52,6 +57,7 @@ async function _overpassJson(query) {
       _overpassMirrorIdx = (_overpassMirrorIdx + attempt) % OVERPASS_MIRRORS.length;
       return json.elements || [];
     } catch (e) {
+      if (e && e.fatal) throw e;
       // Network failure → try next mirror.
       lastErr = e;
       console.warn(`Overpass ${url} → ${e.message}, trying next mirror`);
@@ -1022,8 +1028,13 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
     roofH = 0;
   }
 
-  const wallTop = baseElev + minH + (totalH - roofH);
-  const roofTop = baseElev + minH + totalH;
+  // Simple-3D-Buildings semantics: `height` is the ABSOLUTE top above
+  // ground and the volume spans min_height..height — min_height is where
+  // the part STARTS, not an extra offset added under the height. Adding
+  // both (baseElev + minH + totalH) stretched every stacked building:part
+  // tower: a part with min_height=100/height=200 topped out at 300 m.
+  const roofTop = baseElev + totalH;
+  const wallTop = roofTop - roofH;
   const baseY   = baseElev + minH;
   const bucket  = _buildingBucket(building.coords);
 
