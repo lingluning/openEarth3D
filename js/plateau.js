@@ -503,7 +503,11 @@ function buildEcefToLocalMatrix(bb) {
 
 // ── b3dm parser ────────────────────────────────────────────────────────
 // b3dm = 28-byte header + featureTable (JSON + binary) + batchTable
-//        (JSON + binary) + embedded glb. We skip everything except the glb.
+//        (JSON + binary) + embedded glb. Returns { glb, rtcCenter } —
+// PLATEAU's tiles store the tile origin in the feature table's
+// RTC_CENTER (ECEF metres) and use Draco-compressed vertices that
+// sit relative to it, so we have to bake the centre into the tile
+// transform or every building lands at the wrong spot.
 function parseB3dm(buffer) {
   const view = new DataView(buffer);
   const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1),
@@ -513,7 +517,33 @@ function parseB3dm(buffer) {
   const ftBinLen  = view.getUint32(16, true);
   const btJsonLen = view.getUint32(20, true);
   const btBinLen  = view.getUint32(24, true);
-  return buffer.slice(28 + ftJsonLen + ftBinLen + btJsonLen + btBinLen);
+  let rtcCenter = null;
+  if (ftJsonLen > 0) {
+    try {
+      const ftJsonBytes = new Uint8Array(buffer, 28, ftJsonLen);
+      const ft = JSON.parse(new TextDecoder().decode(ftJsonBytes));
+      if (Array.isArray(ft.RTC_CENTER) && ft.RTC_CENTER.length === 3) rtcCenter = ft.RTC_CENTER;
+    } catch {}
+  }
+  const glb = buffer.slice(28 + ftJsonLen + ftBinLen + btJsonLen + btBinLen);
+  return { glb, rtcCenter };
+}
+
+// glTF binary: 12-byte header (magic, version, length), then chunks. The
+// first chunk is the JSON. Read it and pull `extensions.CESIUM_RTC.center`
+// — the alternative way PLATEAU encodes the per-tile ECEF anchor when it
+// isn't in the b3dm feature table.
+function readGlbCesiumRtcCenter(glb) {
+  try {
+    const view = new DataView(glb);
+    // "glTF" little-endian = 0x46546C67
+    if (view.getUint32(0, true) !== 0x46546C67) return null;
+    const jsonLen = view.getUint32(12, true);
+    const jsonBytes = new Uint8Array(glb, 20, jsonLen);
+    const json = JSON.parse(new TextDecoder().decode(jsonBytes));
+    const c = json && json.extensions && json.extensions.CESIUM_RTC && json.extensions.CESIUM_RTC.center;
+    return (Array.isArray(c) && c.length === 3) ? c : null;
+  } catch { return null; }
 }
 
 // ── Bounding-volume tests ─────────────────────────────────────────────
@@ -615,7 +645,18 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
   group.name = 'plateau';
   ecefToLocal.decompose(group.position, group.quaternion, group.scale);
 
+  // GLTFLoader + DRACOLoader. PLATEAU's LOD2 glb tiles use Draco mesh
+  // compression — without this every loader.parse() throws "No DRACOLoader
+  // instance provided" and we render nothing.
   const loader = new THREE.GLTFLoader();
+  if (typeof THREE.DRACOLoader === 'function') {
+    const draco = new THREE.DRACOLoader();
+    draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/draco/');
+    draco.setDecoderConfig({ type: 'js' });   // wasm decoder needs CORS+headers we don't have; js works everywhere
+    loader.setDRACOLoader(draco);
+  } else {
+    console.warn('[PLATEAU] DRACOLoader script not loaded — LOD2 tiles will fail');
+  }
   let done = 0;
   const CONCURRENCY = 6;
 
@@ -627,17 +668,35 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       const magic = String.fromCharCode(
         new DataView(buffer).getUint8(0), new DataView(buffer).getUint8(1),
         new DataView(buffer).getUint8(2), new DataView(buffer).getUint8(3));
-      const glb = magic === 'b3dm' ? parseB3dm(buffer) : buffer;
+      let glb, rtcCenter = null;
+      if (magic === 'b3dm') {
+        const parsed = parseB3dm(buffer);
+        glb = parsed.glb;
+        rtcCenter = parsed.rtcCenter;     // ECEF metres
+      } else {
+        glb = buffer;
+      }
+      // glTF can also carry the centre via CESIUM_RTC extension; check
+      // there if the b3dm feature table didn't have it.
+      if (!rtcCenter) rtcCenter = readGlbCesiumRtcCenter(glb);
+
       // GLTFLoader needs a resource path for any EXTERNAL textures/bins the
       // glb references relatively (PLATEAU textured tiles often do).
       const resPath = leaf.url.substring(0, leaf.url.lastIndexOf('/') + 1);
       const gltf = await new Promise((resolve, reject) => {
         loader.parse(glb, resPath, resolve, reject);
       });
-      // 3D Tiles convention: glTF assets are Y-up. Tile transforms in ECEF
-      // already include the orientation flip, so we just apply the tile
-      // transform and let the group's ECEF→local matrix do the rest.
-      leaf.transform.decompose(gltf.scene.position, gltf.scene.quaternion, gltf.scene.scale);
+      // Bake the per-tile ECEF anchor (CESIUM_RTC / RTC_CENTER) into the
+      // tile transform. Without this the building vertices, which are
+      // *relative* to the centre, sit near the earth's centre or some
+      // other wrong absolute position and you get an empty scene.
+      const tileXform = leaf.transform.clone();
+      if (rtcCenter) {
+        tileXform.multiply(
+          new THREE.Matrix4().makeTranslation(rtcCenter[0], rtcCenter[1], rtcCenter[2])
+        );
+      }
+      tileXform.decompose(gltf.scene.position, gltf.scene.quaternion, gltf.scene.scale);
       // Replace PBR with Phong so PLATEAU buildings sit in the same flat-
       // shaded cartoon look as OSM but DON'T lose their detail maps the
       // way Lambert did. MeshPhongMaterial supports map + normalMap +
