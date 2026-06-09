@@ -362,15 +362,16 @@ async function run() {
   if (showBuildings) {
     setProgress(0.75, 'OSMデータ取得中（道路・水域・樹木）…');
 
-    // Kick PLATEAU lookup in parallel with OSM so we don't pay the wait
-    // serially. If PLATEAU is disabled or there's no coverage we just
-    // skip the await and use OSM buildings.
-    const plateauCity = usePlateau ? findPlateauCity(lat, lon) : null;
-    const plateauPromise = plateauCity
-      ? fetchPlateauTilesetUrl(plateauCity.code).catch(e => { console.warn('PLATEAU lookup failed:', e); return null; })
+    // Kick PLATEAU lookup in parallel with OSM. fetchPlateauBestForPoint
+    // walks every PLATEAU city whose bbox contains the click point and
+    // picks the one with the highest available LOD (LOD2 ≫ LOD1) — so
+    // a Tokyo-station click that intersects both Chiyoda and Chuo bboxes
+    // ends up on whichever has actual LOD2 in the catalog.
+    const plateauPromise = usePlateau
+      ? fetchPlateauBestForPoint(lat, lon).catch(e => { console.warn('PLATEAU lookup failed:', e); return null; })
       : Promise.resolve(null);
 
-    const [bRes, gRes, tilesetUrl] = await Promise.all([
+    const [bRes, gRes, plateauPick] = await Promise.all([
       Promise.allSettled([fetchBuildings(bb)]).then(r => r[0]),
       Promise.allSettled([fetchGroundFeatures(bb)]).then(r => r[0]),
       plateauPromise,
@@ -394,16 +395,17 @@ async function run() {
 
       // PLATEAU path
       let usedPlateau = false;
-      if (tilesetUrl) {
+      if (plateauPick) {
         try {
-          setProgress(0.80, `PLATEAU LOD2 (${plateauCity.name}) 読込中…`);
-          const plateauGroup = await loadPlateauBuildings(tilesetUrl, bb,
+          const lodLabel = plateauPick.lod.toUpperCase();
+          setProgress(0.80, `PLATEAU ${lodLabel} (${plateauPick.city.name}) 読込中…`);
+          const plateauGroup = await loadPlateauBuildings(plateauPick.url, bb,
             (p, label) => setProgress(0.80 + p * 0.15, label));
           if (plateauGroup) {
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;
             usedPlateau = true;
-            setProgress(0.96, `✨ PLATEAU LOD2 ${plateauCity.name} で表示中`);
+            setProgress(0.96, `✨ PLATEAU ${lodLabel} ${plateauPick.city.name} で表示中`);
           }
         } catch (e) {
           console.warn('PLATEAU load failed, falling back to OSM:', e);
@@ -420,9 +422,8 @@ async function run() {
         scene.add(currentBuildings);
         const failNote = (bRes.status === 'rejected' || gRes.status === 'rejected')
           ? ' ⚠️ 一部のOSMデータ取得失敗' : '';
-        const plateauNote = (usePlateau && !plateauCity) ? ' (PLATEAU圏外)'
-                          : (usePlateau && plateauCity && !tilesetUrl) ? ' (PLATEAUデータ無し)'
-                          : '';
+        const plateauNote = !usePlateau ? ''
+                          : (findPlateauCities(lat, lon).length === 0 ? ' (PLATEAU圏外)' : ' (PLATEAUデータ無し)');
         setProgress(0.96,
           `建物 ${parsed.length} 棟・道路 ${feats.roads.length}・橋 ${feats.bridges.length}・水域 ${feats.waters.length}・樹木 ${feats.trees.length} を生成${plateauNote}${failNote}`
         );
