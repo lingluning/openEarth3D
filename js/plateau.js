@@ -634,8 +634,8 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
   const leaves = [];
   const visited = new Set();   // guard against cyclic external refs
 
-  async function walk(tile, inherited, baseUrl) {
-    const region = tile.boundingVolume && tile.boundingVolume.region;
+  async function walk(tile, inherited, baseUrl, inheritedRegion) {
+    const region = (tile.boundingVolume && tile.boundingVolume.region) || inheritedRegion;
     if (!tileRegionIntersects(region, bb)) return;
 
     const xform = inherited.clone();
@@ -643,7 +643,7 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
 
     // Recurse into in-tileset children first.
     if (Array.isArray(tile.children) && tile.children.length > 0) {
-      for (const c of tile.children) await walk(c, xform, baseUrl);
+      for (const c of tile.children) await walk(c, xform, baseUrl, region);
       // A tile can carry BOTH children and content; PLATEAU usually puts
       // the geometry only on the deepest level, so if it has children we
       // don't also load its own content (avoids double-draw).
@@ -661,14 +661,16 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       try {
         const sub = await fetch(absUrl).then(r => r.json());
         const subBase = absUrl.substring(0, absUrl.lastIndexOf('/') + 1);
-        if (sub && sub.root) await walk(sub.root, xform, subBase);
+        if (sub && sub.root) await walk(sub.root, xform, subBase, region);
       } catch (e) {
         console.warn('PLATEAU external tileset failed:', absUrl, e.message);
       }
     } else {
       // Real content tile (b3dm / glb). Store its ABSOLUTE url so loadOne
-      // doesn't need to know which nested tileset it came from.
-      leaves.push({ url: absUrl, transform: xform, _idx: leaves.length });
+      // doesn't need to know which nested tileset it came from. Carry the
+      // tile's bounding region so loadOne has a fallback ECEF anchor when
+      // the b3dm has no RTC_CENTER and no CESIUM_RTC extension.
+      leaves.push({ url: absUrl, transform: xform, region, _idx: leaves.length });
     }
   }
 
@@ -725,6 +727,27 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       // there if the b3dm feature table didn't have it.
       if (!rtcCenter) rtcCenter = readGlbCesiumRtcCenter(glb);
 
+      // FALLBACK ANCHOR. If we still have no RTC_CENTER and leaf.transform
+      // is identity, the b3dm gave us no spatial info at all. Without an
+      // anchor the loop below skips the ENU rotation and the glTF Y-up
+      // vertices get fed to the group's ECEF→local matrix as if they were
+      // absolute ECEF coordinates — producing severe tilt + displacement
+      // that's hard to distinguish from the old wrong-axis bug.
+      // Use the tile's region centroid (always present in PLATEAU
+      // tilesets) as a substitute RTC_CENTER. The geometry inside the
+      // tile is small (< 1 km) compared to the Earth, so the ENU basis at
+      // the centroid is accurate enough for every vertex in the tile.
+      let anchorSource = rtcCenter ? 'rtc' : null;
+      if (!rtcCenter && leaf.region) {
+        const lon = (leaf.region[0] + leaf.region[2]) / 2 * 180 / Math.PI;
+        const lat = (leaf.region[1] + leaf.region[3]) / 2 * 180 / Math.PI;
+        const h   = (leaf.region[4] + leaf.region[5]) / 2;
+        const c   = geodeticToEcef(lat, lon, h);
+        rtcCenter = [c.x, c.y, c.z];
+        anchorSource = 'region';
+      }
+      if (!rtcCenter) anchorSource = 'NONE';
+
       // GLTFLoader needs a resource path for any EXTERNAL textures/bins the
       // glb references relatively (PLATEAU textured tiles often do).
       const resPath = leaf.url.substring(0, leaf.url.lastIndexOf('/') + 1);
@@ -743,9 +766,10 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       if (rtcCenter) {
         tileXform.multiply(_enuToEcefMatrix(rtcCenter));
       }
-      if (leaf._idx === 0) {
-        console.log('[PLATEAU] tile#0 RTC_CENTER =', rtcCenter,
-          '| leaf.transform identity =', leaf.transform.equals(new THREE.Matrix4()));
+      if (leaf._idx < 3) {
+        console.log(`[PLATEAU] tile#${leaf._idx} anchor=${anchorSource} ` +
+          `RTC=${rtcCenter ? rtcCenter.map(n => n.toFixed(0)).join(',') : 'none'} ` +
+          `leaf.transform.identity=${leaf.transform.equals(new THREE.Matrix4())}`);
       }
       tileXform.decompose(gltf.scene.position, gltf.scene.quaternion, gltf.scene.scale);
       // Replace PBR with Phong so PLATEAU buildings sit in the same flat-
