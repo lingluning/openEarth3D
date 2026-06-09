@@ -414,17 +414,25 @@ async function run() {
             (p, label) => setProgress(0.80 + p * 0.15, label));
           if (plateauGroup) {
             // Vertical alignment. PLATEAU vertices carry ELLIPSOIDAL height
-            // (ECEF), while our terrain is built from orthometric DEM height
-            // (above sea level). The two differ by the geoid undulation
-            // (~36-40 m in Japan), so PLATEAU buildings float that far above
-            // the terrain. Measure the gap at the scene centre and translate
-            // the whole group down to sit on the ground. With vertExag forced
-            // to 1 above, this single shift aligns them cleanly.
+            // (ECEF), our terrain orthometric DEM height (above sea level);
+            // the geoid undulation (~36-40 m in Japan) makes buildings float.
+            // Drop the group so its lowest point sits on the terrain centre.
             plateauGroup.updateMatrixWorld(true);
             const box = new THREE.Box3().setFromObject(plateauGroup);
             if (isFinite(box.min.y)) {
               const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
-              plateauGroup.position.y += (terrainCenterY - box.min.y);
+              const shift = terrainCenterY - box.min.y;
+              // Sanity clamp: a correct transform leaves only the geoid
+              // offset (tens of metres). A shift of hundreds of metres means
+              // the tile transform is still wrong — don't amplify it, log so
+              // it's diagnosable, and leave the group where the transform put
+              // it (closer to correct than a huge bogus shift).
+              if (Math.abs(shift) < 300) {
+                plateauGroup.position.y += shift;
+                console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m`);
+              } else {
+                console.warn(`[PLATEAU] vertical shift ${shift.toFixed(0)} m too large — transform likely still wrong; not applying`);
+              }
             }
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;

@@ -686,15 +686,29 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       const gltf = await new Promise((resolve, reject) => {
         loader.parse(glb, resPath, resolve, reject);
       });
-      // Bake the per-tile ECEF anchor (CESIUM_RTC / RTC_CENTER) into the
-      // tile transform. Without this the building vertices, which are
-      // *relative* to the centre, sit near the earth's centre or some
-      // other wrong absolute position and you get an empty scene.
+      // Per-tile transform to absolute ECEF. Order (applied right-to-left
+      // to a vertex):
+      //   1. UP_AXIS  — glTF is Y-up, the 3D Tiles / ECEF frame is Z-up.
+      //      Every hand-rolled loader that skips this gets buildings that
+      //      look upright among themselves but sit tilted + displaced once
+      //      the group's ECEF→local matrix is applied. rotX(+90°) maps
+      //      glTF +Y (up) to +Z.
+      //   2. translate(RTC_CENTER) — vertices are stored relative to this
+      //      ECEF anchor (CESIUM_RTC / b3dm RTC_CENTER). Added AFTER the
+      //      up-axis rotation because the centre is an ECEF (Z-up) point.
+      //   3. leaf.transform — accumulated tile transforms (usually identity
+      //      for PLATEAU leaves).
+      const UP_AXIS = new THREE.Matrix4().makeRotationX(Math.PI / 2);
       const tileXform = leaf.transform.clone();
       if (rtcCenter) {
         tileXform.multiply(
           new THREE.Matrix4().makeTranslation(rtcCenter[0], rtcCenter[1], rtcCenter[2])
         );
+      }
+      tileXform.multiply(UP_AXIS);
+      if (leaf._idx === 0) {
+        console.log('[PLATEAU] tile#0 RTC_CENTER =', rtcCenter,
+          '| leaf.transform identity =', leaf.transform.equals(new THREE.Matrix4()));
       }
       tileXform.decompose(gltf.scene.position, gltf.scene.quaternion, gltf.scene.scale);
       // Replace PBR with Phong so PLATEAU buildings sit in the same flat-
@@ -773,6 +787,15 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
     console.warn('[PLATEAU] all tiles failed to load — falling back to OSM');
     return null;
   }
+  // Report the group's local-space bounds so we can see if buildings land
+  // at sane coordinates (a few hundred metres span, Y near ground level)
+  // vs. wildly off (transform bug).
+  group.updateMatrixWorld(true);
+  const dbgBox = new THREE.Box3().setFromObject(group);
+  console.log('[PLATEAU] group bounds (local m):',
+    'x', dbgBox.min.x.toFixed(0), '→', dbgBox.max.x.toFixed(0),
+    '| y', dbgBox.min.y.toFixed(0), '→', dbgBox.max.y.toFixed(0),
+    '| z', dbgBox.min.z.toFixed(0), '→', dbgBox.max.z.toFixed(0));
   console.log(`[PLATEAU] rendered ${group.children.length} tile(s)`);
   return group;
 }
