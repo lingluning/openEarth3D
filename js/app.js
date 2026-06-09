@@ -397,7 +397,10 @@ async function run() {
       let usedPlateau = false;
       if (plateauPick) {
         try {
-          const lodLabel = plateauPick.lod.toUpperCase();
+          // plateauPick.label is e.g. "LOD2 (textured)" or "LOD2 (no-texture)"
+          // so the user can tell from the progress whether they're getting
+          // the photo-textured variant (roof detail) or the white model.
+          const lodLabel = plateauPick.label || plateauPick.lod.toUpperCase();
           setProgress(0.80, `PLATEAU ${lodLabel} (${plateauPick.city.name}) 読込中…`);
           const plateauGroup = await loadPlateauBuildings(plateauPick.url, bb,
             (p, label) => setProgress(0.80 + p * 0.15, label));

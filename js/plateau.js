@@ -315,7 +315,7 @@ const _PLATEAU_LOOKUP_CACHE = {};
 async function fetchPlateauTilesetUrl(cityCode) {
   if (_PLATEAU_LOOKUP_CACHE[cityCode] !== undefined) return _PLATEAU_LOOKUP_CACHE[cityCode];
   let cached = null;
-  try { cached = JSON.parse(sessionStorage.getItem('plateau:' + cityCode) || 'null'); } catch {}
+  try { cached = JSON.parse(sessionStorage.getItem('plateau:v2:' + cityCode) || 'null'); } catch {}
   if (cached !== null) {
     _PLATEAU_LOOKUP_CACHE[cityCode] = cached;
     return cached;
@@ -339,16 +339,40 @@ async function fetchPlateauTilesetUrl(cityCode) {
     const json = await res.json();
     const all = (json?.data?.datasets?.items || []).flatMap(d => d.items || []);
     const bldg = all.filter(i => i.url && i.url.includes('bldg') && i.url.endsWith('tileset.json'));
-    const lod2 = bldg.find(i => /lod2/i.test(i.url));
-    const lod1 = bldg.find(i => /lod1/i.test(i.url));
-    const pick = lod2 || lod1 || bldg[0];
-    if (pick) result = { url: pick.url, lod: lod2 ? 'lod2' : lod1 ? 'lod1' : 'lod?' };
+    // PLATEAU often ships a single LOD2 in several variants:
+    //   lod2_texture                     ← photogrammetric textures, what
+    //                                      the official viewer uses ✨
+    //   lod2_low_resolution_texture      ← lower-res photo textures
+    //   lod2_no_texture                  ← white-model geometry only
+    //   lod2                             ← sometimes the textured one,
+    //                                      sometimes ambiguous
+    // We want textured first so roofs read with actual photo detail
+    // rather than as untextured grey shapes. Priority:
+    //   high-res textured → low-res textured → ambiguous lod2 → no-texture
+    const isLod2 = i => /lod2/i.test(i.url);
+    const isNoTex = i => /no_?texture/i.test(i.url);
+    const isLowResTex = i => /low_?resolution_?texture/i.test(i.url);
+    const isHighResTex = i => isLod2(i) && /texture/i.test(i.url) && !isNoTex(i) && !isLowResTex(i);
+    const lod2HighTex = bldg.find(isHighResTex);
+    const lod2LowTex  = bldg.find(i => isLod2(i) && isLowResTex(i));
+    const lod2Plain   = bldg.find(i => isLod2(i) && !/texture/i.test(i.url));   // ambiguous, often textured
+    const lod2NoTex   = bldg.find(i => isLod2(i) && isNoTex(i));
+    const lod1        = bldg.find(i => /lod1/i.test(i.url));
+    const pick = lod2HighTex || lod2LowTex || lod2Plain || lod2NoTex || lod1 || bldg[0];
+    if (pick) {
+      const lodTag = isLod2(pick) ? 'lod2' : /lod1/i.test(pick.url) ? 'lod1' : 'lod?';
+      const texTag = isNoTex(pick) ? ' (no-texture)'
+                  : isLowResTex(pick) ? ' (low-res tex)'
+                  : isLod2(pick) && /texture/i.test(pick.url) ? ' (textured)'
+                  : '';
+      result = { url: pick.url, lod: lodTag, label: lodTag.toUpperCase() + texTag };
+    }
   } catch (e) {
     // Network / abort — return null so caller can try the next city or
     // fall back to OSM. Cache the null so we don't re-probe.
   }
   _PLATEAU_LOOKUP_CACHE[cityCode] = result;
-  try { sessionStorage.setItem('plateau:' + cityCode, JSON.stringify(result)); } catch {}
+  try { sessionStorage.setItem('plateau:v2:' + cityCode, JSON.stringify(result)); } catch {}
   return result;
 }
 
@@ -502,27 +526,34 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       // already include the orientation flip, so we just apply the tile
       // transform and let the group's ECEF→local matrix do the rest.
       leaf.transform.decompose(gltf.scene.position, gltf.scene.quaternion, gltf.scene.scale);
-      // Cartoon-pass: PLATEAU's glb tiles ship with MeshStandardMaterial
-      // (PBR). Replace each with a MeshLambertMaterial preserving colour
-      // and texture, so the buildings get the same flat-shaded SketchUp
-      // look as our OSM extrusions instead of a separate PBR feel. The
-      // original material is disposed to free the GPU resources it held.
+      // Replace PBR with Phong so PLATEAU buildings sit in the same flat-
+      // shaded cartoon look as OSM but DON'T lose their detail maps the
+      // way Lambert did. MeshPhongMaterial supports map + normalMap +
+      // specularMap — and PLATEAU's textured LOD2 tiles carry both diffuse
+      // and (often) normal maps that give roofs their tiled / shingled
+      // look in the official viewer. The previous Lambert swap silently
+      // dropped normalMap and that was the missing roof detail.
       gltf.scene.traverse(o => {
         if (!o.isMesh) return;
         const mats = Array.isArray(o.material) ? o.material : [o.material];
         const next = mats.map(m => {
           if (!m) return m;
-          const lambert = new THREE.MeshLambertMaterial({
-            color: m.color ? m.color.clone() : new THREE.Color(0xffffff),
-            map:   m.map || null,
-            side:  m.side || THREE.FrontSide,
-            transparent: !!m.transparent,
-            opacity: m.opacity != null ? m.opacity : 1,
+          const phong = new THREE.MeshPhongMaterial({
+            color:        m.color ? m.color.clone() : new THREE.Color(0xffffff),
+            map:          m.map || null,
+            normalMap:    m.normalMap || null,
+            specularMap:  m.specularMap || null,
+            shininess:    8,        // matte enough to keep cartoon feel
+            specular:     new THREE.Color(0x222222),
+            side:         m.side || THREE.FrontSide,
+            transparent:  !!m.transparent,
+            opacity:      m.opacity != null ? m.opacity : 1,
           });
-          lambert.name = m.name || 'plateau';
-          // Don't dispose m.map — Lambert keeps using the same texture.
+          if (m.map) m.map.encoding = THREE.sRGBEncoding;
+          phong.name = m.name || 'plateau';
+          // Don't dispose m.map / m.normalMap — phong keeps using them.
           m.dispose();
-          return lambert;
+          return phong;
         });
         o.material = Array.isArray(o.material) ? next : next[0];
       });
