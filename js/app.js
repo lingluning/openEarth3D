@@ -413,11 +413,42 @@ async function run() {
           const plateauGroup = await loadPlateauBuildings(plateauPick.url, bb,
             (p, label) => setProgress(0.80 + p * 0.15, label));
           if (plateauGroup) {
-            // Vertical alignment. PLATEAU's ENU frame places every building
-            // at its true ELLIPSOIDAL height, but our terrain DEM is in
-            // ORTHOMETRIC metres — the two differ by the (locally near-
-            // constant) geoid undulation (~+36 m around Tokyo). So a single
-            // global Y shift lines them up.
+            plateauGroup.updateMatrixWorld(true);
+
+            // ── Cull buildings outside the requested area ─────────────────
+            // A single PLATEAU b3dm tile covers a whole district (~2 km),
+            // far larger than a 1 km request. We keep a tile if its region
+            // merely TOUCHES the bbox, so one corner-touching tile drags in
+            // buildings that sprawl 1–1.5 km past the map edge, floating
+            // over no terrain / aerial. Cull per-building: in world space the
+            // group's coords ARE the local map metres (terrain sits at scene
+            // origin, 0→xSize × 0→zSize), so drop any mesh whose centre falls
+            // outside the map plus a small margin for border straddlers.
+            const MARGIN = 120;   // metres of slack beyond the map edge
+            const toCull = [];
+            plateauGroup.traverse(o => {
+              if (!o.isMesh) return;
+              const b = new THREE.Box3().setFromObject(o);
+              if (!isFinite(b.min.x)) return;
+              const cxw = (b.min.x + b.max.x) / 2, czw = (b.min.z + b.max.z) / 2;
+              if (cxw < -MARGIN || cxw > xSize + MARGIN ||
+                  czw < -MARGIN || czw > zSize + MARGIN) toCull.push(o);
+            });
+            for (const o of toCull) {
+              if (o.parent) o.parent.remove(o);
+              if (o.geometry) o.geometry.dispose();
+            }
+            if (toCull.length) {
+              console.log(`[PLATEAU] culled ${toCull.length} building(s) outside the ${km} km area`);
+              plateauGroup.updateMatrixWorld(true);
+            }
+
+            // ── Vertical alignment ───────────────────────────────────────
+            // PLATEAU's ENU frame places every building at its true
+            // ELLIPSOIDAL height, but our terrain DEM is in ORTHOMETRIC
+            // metres — the two differ by the (locally near-constant) geoid
+            // undulation (~+36 m around Tokyo). So a single global Y shift
+            // lines them up.
             //
             // The previous single-centre-ray approach was fragile: PLATEAU
             // LOD2 has NO ground plane, so a ray down the scene centre often
@@ -427,7 +458,6 @@ async function run() {
             // those bases as "typical ground". Median rejects the handful of
             // sunken/underground meshes and basement geometry. Align that to
             // the median terrain elevation across the scene.
-            plateauGroup.updateMatrixWorld(true);
             const bases = [];
             plateauGroup.traverse(o => {
               if (!o.isMesh) return;
