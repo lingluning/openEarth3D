@@ -339,23 +339,25 @@ async function fetchPlateauTilesetUrl(cityCode) {
     const json = await res.json();
     const all = (json?.data?.datasets?.items || []).flatMap(d => d.items || []);
     const bldg = all.filter(i => i.url && i.url.includes('bldg') && i.url.endsWith('tileset.json'));
-    // PLATEAU often ships a single LOD2 in several variants:
-    //   lod2_texture                     ← photogrammetric textures, what
-    //                                      the official viewer uses ✨
-    //   lod2_low_resolution_texture      ← lower-res photo textures
-    //   lod2_no_texture                  ← white-model geometry only
-    //   lod2                             ← sometimes the textured one,
-    //                                      sometimes ambiguous
-    // We want textured first so roofs read with actual photo detail
-    // rather than as untextured grey shapes. Priority:
-    //   high-res textured → low-res textured → ambiguous lod2 → no-texture
+    // Diagnostic: dump the full bldg list so users can see what the
+    // catalog actually offered for this city — answers "why no
+    // textures" by showing whether textured variants even exist.
+    if (bldg.length) {
+      console.log(`[PLATEAU ${cityCode}] catalog returned ${bldg.length} bldg dataset(s):`);
+      for (const i of bldg) console.log('  •', i.name || '(no name)', '→', i.url);
+    }
+    // Match texture variants by URL OR name (PLATEAU sometimes encodes
+    // "texture / no_texture / low_resolution" in either field).
+    const tag = i => ((i.url || '') + ' ' + (i.name || '')).toLowerCase();
     const isLod2 = i => /lod2/i.test(i.url);
-    const isNoTex = i => /no_?texture/i.test(i.url);
-    const isLowResTex = i => /low_?resolution_?texture/i.test(i.url);
-    const isHighResTex = i => isLod2(i) && /texture/i.test(i.url) && !isNoTex(i) && !isLowResTex(i);
+    const isNoTex = i => /no[_\- ]?texture/i.test(tag(i)) || /テクスチャ無/.test(tag(i));
+    const isLowResTex = i => /low[_\- ]?(resolution|res)[_\- ]?texture/i.test(tag(i))
+                          || /低解像度/.test(tag(i));
+    const isAnyTextured = i => isLod2(i) && /texture|テクスチャ/.test(tag(i)) && !isNoTex(i);
+    const isHighResTex = i => isAnyTextured(i) && !isLowResTex(i);
     const lod2HighTex = bldg.find(isHighResTex);
     const lod2LowTex  = bldg.find(i => isLod2(i) && isLowResTex(i));
-    const lod2Plain   = bldg.find(i => isLod2(i) && !/texture/i.test(i.url));   // ambiguous, often textured
+    const lod2Plain   = bldg.find(i => isLod2(i) && !/texture|テクスチャ/.test(tag(i)));
     const lod2NoTex   = bldg.find(i => isLod2(i) && isNoTex(i));
     const lod1        = bldg.find(i => /lod1/i.test(i.url));
     const pick = lod2HighTex || lod2LowTex || lod2Plain || lod2NoTex || lod1 || bldg[0];
@@ -363,13 +365,14 @@ async function fetchPlateauTilesetUrl(cityCode) {
       const lodTag = isLod2(pick) ? 'lod2' : /lod1/i.test(pick.url) ? 'lod1' : 'lod?';
       const texTag = isNoTex(pick) ? ' (no-texture)'
                   : isLowResTex(pick) ? ' (low-res tex)'
-                  : isLod2(pick) && /texture/i.test(pick.url) ? ' (textured)'
+                  : isAnyTextured(pick) ? ' (textured)'
+                  : isLod2(pick) ? ' (no tex suffix)'
                   : '';
+      console.log(`[PLATEAU ${cityCode}] picked:`, pick.name || pick.url, '→', lodTag + texTag);
       result = { url: pick.url, lod: lodTag, label: lodTag.toUpperCase() + texTag };
     }
   } catch (e) {
-    // Network / abort — return null so caller can try the next city or
-    // fall back to OSM. Cache the null so we don't re-probe.
+    console.warn(`[PLATEAU ${cityCode}] catalog query failed:`, e);
   }
   _PLATEAU_LOOKUP_CACHE[cityCode] = result;
   try { sessionStorage.setItem('plateau:v2:' + cityCode, JSON.stringify(result)); } catch {}
@@ -493,7 +496,7 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
     if (hasChildren) {
       for (const c of tile.children) walk(c, xform);
     } else if (tile.content?.uri) {
-      leaves.push({ uri: tile.content.uri, transform: xform });
+      leaves.push({ uri: tile.content.uri, transform: xform, _idx: leaves.length });
     }
   }
   walk(tileset.root, new THREE.Matrix4());
@@ -533,13 +536,24 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       // and (often) normal maps that give roofs their tiled / shingled
       // look in the official viewer. The previous Lambert swap silently
       // dropped normalMap and that was the missing roof detail.
+      let leafTextured = 0, leafTotal = 0;
       gltf.scene.traverse(o => {
         if (!o.isMesh) return;
+        leafTotal++;
         const mats = Array.isArray(o.material) ? o.material : [o.material];
         const next = mats.map(m => {
           if (!m) return m;
+          if (m.map) leafTextured++;
+          // CRITICAL: when there's a diffuse texture, force the material's
+          // base colour to white. PLATEAU's source materials sometimes set
+          // colour to a dim grey that gets MULTIPLIED with the texture,
+          // making photo textures look murky / dark. White = texture
+          // passes through unmodified.
+          const color = m.map
+            ? new THREE.Color(0xffffff)
+            : (m.color ? m.color.clone() : new THREE.Color(0xcccccc));
           const phong = new THREE.MeshPhongMaterial({
-            color:        m.color ? m.color.clone() : new THREE.Color(0xffffff),
+            color,
             map:          m.map || null,
             normalMap:    m.normalMap || null,
             specularMap:  m.specularMap || null,
@@ -557,6 +571,12 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
         });
         o.material = Array.isArray(o.material) ? next : next[0];
       });
+      // First few tiles report their texture density so the user can
+      // tell from console whether textures actually exist on disk vs.
+      // we're rendering a no-texture variant.
+      if (leaf._idx < 3 && leafTotal > 0) {
+        console.log(`[PLATEAU tile ${leaf.uri}] ${leafTextured}/${leafTotal} meshes carry a diffuse texture`);
+      }
       group.add(gltf.scene);
     } catch (e) {
       // Skip individual tile failures; PLATEAU CDN occasionally serves
