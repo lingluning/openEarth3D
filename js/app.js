@@ -425,22 +425,32 @@ async function run() {
             // origin, 0→xSize × 0→zSize), so drop any mesh whose centre falls
             // outside the map plus a small margin for border straddlers.
             const MARGIN = 120;   // metres of slack beyond the map edge
+            let meshCount = 0;
             const toCull = [];
             plateauGroup.traverse(o => {
               if (!o.isMesh) return;
+              meshCount++;
               const b = new THREE.Box3().setFromObject(o);
               if (!isFinite(b.min.x)) return;
               const cxw = (b.min.x + b.max.x) / 2, czw = (b.min.z + b.max.z) / 2;
               if (cxw < -MARGIN || cxw > xSize + MARGIN ||
                   czw < -MARGIN || czw > zSize + MARGIN) toCull.push(o);
             });
-            for (const o of toCull) {
-              if (o.parent) o.parent.remove(o);
-              if (o.geometry) o.geometry.dispose();
-            }
-            if (toCull.length) {
-              console.log(`[PLATEAU] culled ${toCull.length} building(s) outside the ${km} km area`);
-              plateauGroup.updateMatrixWorld(true);
+            // Safety: if the filter would wipe out (almost) everything, our
+            // local-coordinate assumption is wrong for this dataset — better
+            // to show the buildings sprawling than a blank scene. Skip cull.
+            if (meshCount > 0 && toCull.length < meshCount * 0.95) {
+              for (const o of toCull) {
+                if (o.parent) o.parent.remove(o);
+                if (o.geometry) o.geometry.dispose();
+              }
+              if (toCull.length) {
+                console.log(`[PLATEAU] culled ${toCull.length}/${meshCount} building(s) outside the ${km} km area`);
+                plateauGroup.updateMatrixWorld(true);
+              }
+            } else if (toCull.length) {
+              console.warn(`[PLATEAU] cull skipped — would remove ${toCull.length}/${meshCount} ` +
+                `(coordinate assumption likely off)`);
             }
 
             // ── Vertical alignment ───────────────────────────────────────
