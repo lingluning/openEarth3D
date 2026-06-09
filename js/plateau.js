@@ -336,7 +336,19 @@ async function fetchPlateauTilesetUrl(cityCode) {
       body: JSON.stringify({ query }),
       signal: ctrl.signal,
     });
+    if (!res.ok) {
+      // 400 / 500 / etc from the catalog. MLIT changes their GraphQL
+      // schema occasionally — when it breaks, silently fall through to
+      // OSM rather than aborting the whole generate.
+      console.warn(`[PLATEAU ${cityCode}] catalog HTTP ${res.status} — falling back to OSM`);
+      _PLATEAU_LOOKUP_CACHE[cityCode] = null;
+      try { sessionStorage.setItem('plateau:v2:' + cityCode, 'null'); } catch {}
+      return null;
+    }
     const json = await res.json();
+    if (json?.errors) {
+      console.warn(`[PLATEAU ${cityCode}] GraphQL errors:`, json.errors);
+    }
     const all = (json?.data?.datasets?.items || []).flatMap(d => d.items || []);
     const bldg = all.filter(i => i.url && i.url.includes('bldg') && i.url.endsWith('tileset.json'));
     // Diagnostic: dump the full bldg list so users can see what the

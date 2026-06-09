@@ -4,7 +4,7 @@
 // Buildings stay in buildings.js — there's enough room in Overpass's 40 s
 // timeout to run both requests in parallel from app.js.
 async function fetchGroundFeatures(bb) {
-  const q = `[out:json][timeout:40];
+  const q = `[out:json][timeout:25];
 (
   way["highway"](${bb.s},${bb.w},${bb.n},${bb.e});
   way["natural"="water"](${bb.s},${bb.w},${bb.n},${bb.e});

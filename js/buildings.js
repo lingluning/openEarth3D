@@ -4,7 +4,7 @@
 // We pull buildings AND ground features (roads / water / trees) in one
 // request so the user only waits for a single Overpass round-trip.
 async function fetchBuildings(bb) {
-  const q = `[out:json][timeout:40];
+  const q = `[out:json][timeout:25];
 (
   way["building"](${bb.s},${bb.w},${bb.n},${bb.e});
   relation["building"](${bb.s},${bb.w},${bb.n},${bb.e});
@@ -15,21 +15,49 @@ out body;>;out skel qt;`;
   return _overpassJson(q);
 }
 
-// Shared Overpass helper. Overpass returns plain text on 429 / 504 / 500
-// (e.g. "rate_limited"), so res.json() throws an unhelpful SyntaxError.
-// Detect that and surface the actual status code instead.
+// Shared Overpass helper. The public Overpass API rate-limits aggressively
+// — under load any single endpoint returns 429 "rate_limited" in plain
+// text (so res.json() throws an unhelpful SyntaxError). We rotate through
+// several public mirrors with a tiny back-off so a one-shot 429 from
+// overpass-api.de doesn't kill the whole generate flow.
+const OVERPASS_MIRRORS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.osm.ch/api/interpreter',
+  'https://overpass.openstreetmap.fr/api/interpreter',
+];
+let _overpassMirrorIdx = 0;
+
 async function _overpassJson(query) {
-  const res = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    body: 'data=' + encodeURIComponent(query),
-  });
-  const ct = res.headers.get('content-type') || '';
-  if (!res.ok || !ct.includes('json')) {
-    const snippet = (await res.text()).slice(0, 120).replace(/\s+/g, ' ').trim();
-    throw new Error(`Overpass ${res.status}: ${snippet || res.statusText}`);
+  const body = 'data=' + encodeURIComponent(query);
+  let lastErr = null;
+  // Try every mirror once, starting from wherever the previous successful
+  // call left off (mild round-robin so we spread load across servers).
+  for (let attempt = 0; attempt < OVERPASS_MIRRORS.length; attempt++) {
+    const url = OVERPASS_MIRRORS[(_overpassMirrorIdx + attempt) % OVERPASS_MIRRORS.length];
+    try {
+      const res = await fetch(url, { method: 'POST', body });
+      const ct = res.headers.get('content-type') || '';
+      if (!res.ok || !ct.includes('json')) {
+        const snippet = (await res.text()).slice(0, 120).replace(/\s+/g, ' ').trim();
+        lastErr = new Error(`Overpass ${res.status}: ${snippet || res.statusText}`);
+        // 429 / 504 → try the next mirror after a tiny pause. Other 4xx
+        // are usually our fault (bad query) so retrying won't help.
+        if (res.status !== 429 && res.status !== 504 && res.status !== 503) throw lastErr;
+        console.warn(`Overpass ${url} → ${res.status}, trying next mirror`);
+        await new Promise(r => setTimeout(r, 400 + attempt * 600));   // 0.4, 1.0, 1.6 s
+        continue;
+      }
+      const json = await res.json();
+      _overpassMirrorIdx = (_overpassMirrorIdx + attempt) % OVERPASS_MIRRORS.length;
+      return json.elements || [];
+    } catch (e) {
+      // Network failure → try next mirror.
+      lastErr = e;
+      console.warn(`Overpass ${url} → ${e.message}, trying next mirror`);
+    }
   }
-  const json = await res.json();
-  return json.elements || [];
+  throw lastErr || new Error('Overpass: all mirrors failed');
 }
 
 // Most OSM buildings (especially in Japan) have no `roof:shape` tag — so
