@@ -310,84 +310,131 @@ function findPlateauCity(lat, lon) {
 // ── PLATEAU catalog API — resolve cityCode → best available tileset URL ─
 // Returns { url, lod } where lod ∈ {'lod2','lod1'}. Prefers LOD2 (real
 // roof shapes + measured heights); falls back to LOD1 (extruded boxes).
-// Cached in sessionStorage so re-running the same city skips the API call.
+// Cached in sessionStorage (v3 key) so re-running the same city skips the
+// API call.
 const _PLATEAU_LOOKUP_CACHE = {};
+
+// MLIT migrated the datacatalog GraphQL schema. The old query
+//   datasets(input: {cityCode, type: "plateau"}) { items { items {...} } }
+// now 400s. The current (v3) schema uses areaCodes + a union return with
+// a PlateauDataset fragment exposing per-item lod / texture flags.
+function _plateauQueryV3(cityCode) {
+  return `{
+    datasets(input: { areaCodes: ["${cityCode}"], includeTypes: ["bldg"] }) {
+      name
+      ... on PlateauDataset {
+        items { id name url format lod texture }
+      }
+    }
+  }`;
+}
+function _plateauQueryLegacy(cityCode) {
+  return `{
+    datasets(input: {cityCode: "${cityCode}", type: "plateau"}) {
+      items { items { name url type } }
+    }
+  }`;
+}
+
+async function _plateauGraphql(query) {
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), 8000);
+  const res = await fetch('https://api.plateauview.mlit.go.jp/datacatalog/graphql', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+    signal: ctrl.signal,
+  });
+  return { ok: res.ok, status: res.status, json: res.ok ? await res.json().catch(() => null) : null };
+}
+
+// Flatten either schema's response into a uniform list of
+// { name, url, lod?, texture? }.
+function _plateauFlatten(json) {
+  const ds = json?.data?.datasets;
+  if (!Array.isArray(ds)) return [];
+  const out = [];
+  for (const d of ds) {
+    // v3: dataset has items[] directly (PlateauDataset fragment).
+    if (Array.isArray(d.items)) {
+      for (const it of d.items) {
+        if (it && it.url) out.push({ name: it.name || d.name, url: it.url, lod: it.lod, texture: it.texture });
+      }
+    }
+    // legacy: dataset.items[].items[]
+    if (d.items && Array.isArray(d.items.items)) {
+      for (const it of d.items.items) {
+        if (it && it.url) out.push({ name: it.name, url: it.url });
+      }
+    }
+  }
+  return out;
+}
+
 async function fetchPlateauTilesetUrl(cityCode) {
   if (_PLATEAU_LOOKUP_CACHE[cityCode] !== undefined) return _PLATEAU_LOOKUP_CACHE[cityCode];
   let cached = null;
-  try { cached = JSON.parse(sessionStorage.getItem('plateau:v2:' + cityCode) || 'null'); } catch {}
+  try { cached = JSON.parse(sessionStorage.getItem('plateau:v3:' + cityCode) || 'null'); } catch {}
   if (cached !== null) {
     _PLATEAU_LOOKUP_CACHE[cityCode] = cached;
     return cached;
   }
 
-  const query = `{
-    datasets(input: {cityCode: "${cityCode}", type: "plateau"}) {
-      items { items { name url type } }
-    }
-  }`;
-  const ctrl = new AbortController();
-  setTimeout(() => ctrl.abort(), 8000);
   let result = null;
   try {
-    const res = await fetch('https://api.plateauview.mlit.go.jp/datacatalog/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) {
-      // 400 / 500 / etc from the catalog. MLIT changes their GraphQL
-      // schema occasionally — when it breaks, silently fall through to
-      // OSM rather than aborting the whole generate.
-      console.warn(`[PLATEAU ${cityCode}] catalog HTTP ${res.status} — falling back to OSM`);
+    // Try the current v3 schema first, fall back to the legacy one.
+    let r = await _plateauGraphql(_plateauQueryV3(cityCode));
+    if ((!r.ok || r.json?.errors) ) {
+      const why = r.ok ? JSON.stringify(r.json.errors).slice(0, 160) : 'HTTP ' + r.status;
+      console.warn(`[PLATEAU ${cityCode}] v3 query failed (${why}); trying legacy`);
+      r = await _plateauGraphql(_plateauQueryLegacy(cityCode));
+    }
+    if (!r.ok) {
+      console.warn(`[PLATEAU ${cityCode}] catalog HTTP ${r.status} — falling back to OSM`);
       _PLATEAU_LOOKUP_CACHE[cityCode] = null;
-      try { sessionStorage.setItem('plateau:v2:' + cityCode, 'null'); } catch {}
+      try { sessionStorage.setItem('plateau:v3:' + cityCode, 'null'); } catch {}
       return null;
     }
-    const json = await res.json();
-    if (json?.errors) {
-      console.warn(`[PLATEAU ${cityCode}] GraphQL errors:`, json.errors);
-    }
-    const all = (json?.data?.datasets?.items || []).flatMap(d => d.items || []);
+    if (r.json?.errors) console.warn(`[PLATEAU ${cityCode}] GraphQL errors:`, r.json.errors);
+
+    const all = _plateauFlatten(r.json);
     const bldg = all.filter(i => i.url && i.url.includes('bldg') && i.url.endsWith('tileset.json'));
-    // Diagnostic: dump the full bldg list so users can see what the
-    // catalog actually offered for this city — answers "why no
-    // textures" by showing whether textured variants even exist.
     if (bldg.length) {
       console.log(`[PLATEAU ${cityCode}] catalog returned ${bldg.length} bldg dataset(s):`);
-      for (const i of bldg) console.log('  •', i.name || '(no name)', '→', i.url);
+      for (const i of bldg) console.log('  •', i.name || '(no name)',
+        i.lod != null ? `lod${i.lod}` : '', i.texture != null ? `tex=${i.texture}` : '', '→', i.url);
     }
-    // Match texture variants by URL OR name (PLATEAU sometimes encodes
-    // "texture / no_texture / low_resolution" in either field).
+
+    // Classify by the explicit lod / texture fields when v3 provides them,
+    // else fall back to URL/name regex (legacy schema).
     const tag = i => ((i.url || '') + ' ' + (i.name || '')).toLowerCase();
-    const isLod2 = i => /lod2/i.test(i.url);
-    const isNoTex = i => /no[_\- ]?texture/i.test(tag(i)) || /テクスチャ無/.test(tag(i));
-    const isLowResTex = i => /low[_\- ]?(resolution|res)[_\- ]?texture/i.test(tag(i))
-                          || /低解像度/.test(tag(i));
-    const isAnyTextured = i => isLod2(i) && /texture|テクスチャ/.test(tag(i)) && !isNoTex(i);
-    const isHighResTex = i => isAnyTextured(i) && !isLowResTex(i);
-    const lod2HighTex = bldg.find(isHighResTex);
-    const lod2LowTex  = bldg.find(i => isLod2(i) && isLowResTex(i));
-    const lod2Plain   = bldg.find(i => isLod2(i) && !/texture|テクスチャ/.test(tag(i)));
-    const lod2NoTex   = bldg.find(i => isLod2(i) && isNoTex(i));
-    const lod1        = bldg.find(i => /lod1/i.test(i.url));
-    const pick = lod2HighTex || lod2LowTex || lod2Plain || lod2NoTex || lod1 || bldg[0];
-    if (pick) {
-      const lodTag = isLod2(pick) ? 'lod2' : /lod1/i.test(pick.url) ? 'lod1' : 'lod?';
-      const texTag = isNoTex(pick) ? ' (no-texture)'
-                  : isLowResTex(pick) ? ' (low-res tex)'
-                  : isAnyTextured(pick) ? ' (textured)'
-                  : isLod2(pick) ? ' (no tex suffix)'
-                  : '';
-      console.log(`[PLATEAU ${cityCode}] picked:`, pick.name || pick.url, '→', lodTag + texTag);
-      result = { url: pick.url, lod: lodTag, label: lodTag.toUpperCase() + texTag };
+    const lodOf = i => i.lod != null ? Number(i.lod)
+                     : /lod2/i.test(i.url) ? 2 : /lod1/i.test(i.url) ? 1 : 0;
+    const texOf = i => {
+      if (typeof i.texture === 'boolean') return i.texture ? 'hi' : 'no';
+      if (/no[_\- ]?texture|テクスチャ無/i.test(tag(i))) return 'no';
+      if (/low[_\- ]?(resolution|res)[_\- ]?texture|低解像度/i.test(tag(i))) return 'low';
+      if (/texture|テクスチャ/i.test(tag(i))) return 'hi';
+      return 'unknown';
+    };
+    // Score: prefer LOD2, then textured (hi > low > unknown > no).
+    const texRank = { hi: 3, low: 2, unknown: 1, no: 0 };
+    const scored = bldg.map(i => ({ i, lod: lodOf(i), tex: texOf(i) }))
+      .sort((a, b) => (b.lod - a.lod) || (texRank[b.tex] - texRank[a.tex]));
+    const best = scored[0];
+    if (best) {
+      const lodTag = 'lod' + best.lod;
+      const texTag = best.tex === 'no' ? ' (no-texture)'
+                  : best.tex === 'low' ? ' (low-res tex)'
+                  : best.tex === 'hi' ? ' (textured)' : '';
+      console.log(`[PLATEAU ${cityCode}] picked:`, best.i.name || best.i.url, '→', lodTag + texTag);
+      result = { url: best.i.url, lod: lodTag, label: lodTag.toUpperCase() + texTag };
     }
   } catch (e) {
-    console.warn(`[PLATEAU ${cityCode}] catalog query failed:`, e);
+    console.warn(`[PLATEAU ${cityCode}] catalog query failed:`, e.message || e);
   }
   _PLATEAU_LOOKUP_CACHE[cityCode] = result;
-  try { sessionStorage.setItem('plateau:v2:' + cityCode, JSON.stringify(result)); } catch {}
+  try { sessionStorage.setItem('plateau:v3:' + cityCode, JSON.stringify(result)); } catch {}
   return result;
 }
 
