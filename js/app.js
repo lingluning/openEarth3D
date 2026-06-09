@@ -295,13 +295,21 @@ async function run() {
   const lon = parseFloat(document.getElementById('lonInput').value);
   const km  = parseFloat(document.getElementById('rangeKm').value) || 1.0;
   const showBuildings = document.getElementById('toggleBuildings').checked;
-  const vertExag   = parseFloat(document.getElementById('vertExag').value) || 2.0;
+  const vertExagInput = parseFloat(document.getElementById('vertExag').value) || 2.0;
   const photoSrc    = (document.getElementById('photoSource') || {}).value || 'auto';
   const customAerials = parseCustomAerialJson(
     (document.getElementById('customAerialJson') || {}).value || ''
   );
   const meshN       = parseInt(document.getElementById('meshDetail').value, 10) || 128;
   const usePlateau  = document.getElementById('togglePlateau').checked;
+
+  // Vertical exaggeration conflicts with real-scale 3D city models: if the
+  // terrain is stretched 2× but PLATEAU buildings are true-scale, the terrain
+  // slopes twice as steeply as the buildings' base plane and they no longer
+  // sit flush. When we're inside a PLATEAU city with the toggle on, force
+  // true scale (1×) so terrain + LOD2 buildings share one vertical metric.
+  const willTryPlateau = usePlateau && findPlateauCities(lat, lon).length > 0;
+  const vertExag = willTryPlateau ? 1.0 : vertExagInput;
 
   if (isNaN(lat) || isNaN(lon)) { showError('緯度経度を入力してください'); return; }
 
@@ -405,6 +413,19 @@ async function run() {
           const plateauGroup = await loadPlateauBuildings(plateauPick.url, bb,
             (p, label) => setProgress(0.80 + p * 0.15, label));
           if (plateauGroup) {
+            // Vertical alignment. PLATEAU vertices carry ELLIPSOIDAL height
+            // (ECEF), while our terrain is built from orthometric DEM height
+            // (above sea level). The two differ by the geoid undulation
+            // (~36-40 m in Japan), so PLATEAU buildings float that far above
+            // the terrain. Measure the gap at the scene centre and translate
+            // the whole group down to sit on the ground. With vertExag forced
+            // to 1 above, this single shift aligns them cleanly.
+            plateauGroup.updateMatrixWorld(true);
+            const box = new THREE.Box3().setFromObject(plateauGroup);
+            if (isFinite(box.min.y)) {
+              const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
+              plateauGroup.position.y += (terrainCenterY - box.min.y);
+            }
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;
             usedPlateau = true;
