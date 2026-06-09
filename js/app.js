@@ -413,32 +413,52 @@ async function run() {
           const plateauGroup = await loadPlateauBuildings(plateauPick.url, bb,
             (p, label) => setProgress(0.80 + p * 0.15, label));
           if (plateauGroup) {
-            // Vertical alignment, robust to the residual ~15° tilt still in
-            // the PLATEAU transform. Aligning the global bbox bottom (one
-            // tilted corner) over-shoots. Instead cast a ray straight DOWN
-            // through the scene CENTRE onto the PLATEAU geometry and anchor
-            // the lowest hit there (≈ ground at centre) to the terrain at
-            // centre. Local sampling makes it tilt-tolerant — the middle of
-            // the view sits right even while the corners still slope until
-            // the transform is fully fixed.
+            // Vertical alignment. PLATEAU's ENU frame places every building
+            // at its true ELLIPSOIDAL height, but our terrain DEM is in
+            // ORTHOMETRIC metres — the two differ by the (locally near-
+            // constant) geoid undulation (~+36 m around Tokyo). So a single
+            // global Y shift lines them up.
+            //
+            // The previous single-centre-ray approach was fragile: PLATEAU
+            // LOD2 has NO ground plane, so a ray down the scene centre often
+            // hits only a tower ROOF (174 m up in Shinjuku) and then buries
+            // the whole city. Instead, take each building's own base (its
+            // mesh min-Y ≈ the elevation it sits on) and use the MEDIAN of
+            // those bases as "typical ground". Median rejects the handful of
+            // sunken/underground meshes and basement geometry. Align that to
+            // the median terrain elevation across the scene.
             plateauGroup.updateMatrixWorld(true);
-            const cx = xSize / 2, cz = zSize / 2;
-            const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
-            const downRay = new THREE.Raycaster(
-              new THREE.Vector3(cx, 1e5, cz), new THREE.Vector3(0, -1, 0));
-            const hits = downRay.intersectObject(plateauGroup, true);
+            const bases = [];
+            plateauGroup.traverse(o => {
+              if (!o.isMesh) return;
+              const b = new THREE.Box3().setFromObject(o);
+              if (isFinite(b.min.y)) bases.push(b.min.y);
+            });
+            const median = arr => {
+              if (!arr.length) return null;
+              const s = arr.slice().sort((a, b) => a - b);
+              const m = s.length >> 1;
+              return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+            };
+            // Median terrain elevation sampled on a coarse grid.
+            const tSamples = [];
+            for (let i = 1; i < 8; i++)
+              for (let j = 1; j < 8; j++)
+                tSamples.push(getElevAt(elevGrid, meshN, i / 8, j / 8) * vertExag);
+            const buildingBase = median(bases);
+            const terrainMed = median(tSamples);
             let shift = null;
-            if (hits.length) {
-              // Farthest hit along -Y = lowest surface ≈ ground at centre.
-              shift = terrainCenterY - hits[hits.length - 1].point.y;
+            if (buildingBase != null && terrainMed != null) {
+              shift = terrainMed - buildingBase;
             } else {
-              // No building directly at centre — fall back to bbox bottom.
               const box = new THREE.Box3().setFromObject(plateauGroup);
+              const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
               if (isFinite(box.min.y)) shift = terrainCenterY - box.min.y;
             }
             if (shift != null && Math.abs(shift) < 2000) {
               plateauGroup.position.y += shift;
-              console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m (centre-ray)`);
+              console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m ` +
+                `(median of ${bases.length} building bases)`);
             }
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;
