@@ -477,30 +477,72 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
   }
 
   onProgress && onProgress(0, 'PLATEAU カタログ読込中…');
-  const tileset = await fetch(tilesetUrl).then(r => r.json());
-  const baseUrl = tilesetUrl.substring(0, tilesetUrl.lastIndexOf('/') + 1);
 
-  // Collect leaf tiles (no children) whose region intersects bb. PLATEAU
-  // tilesets typically nest content+children at parent levels; we only
-  // grab the deepest content to avoid double-drawing.
+  // Resolve a content reference (relative or absolute) against a base URL.
+  const resolveUrl = (ref, base) => {
+    if (/^https?:\/\//i.test(ref)) return ref;
+    return base + ref;
+  };
+
+  // Pull the content URI from a tile, handling both 3D Tiles 1.0
+  // (content.url) and 1.1 (content.uri). PLATEAU's published tilesets are
+  // overwhelmingly 1.0 — checking only `uri` (as we did) found nothing,
+  // every tile was skipped, leaves stayed empty, and we silently fell back
+  // to OSM. That's why the buildings looked like our box extrusions and
+  // not PLATEAU.
+  const contentUri = tile => tile && tile.content
+    ? (tile.content.uri || tile.content.url || null) : null;
+
+  // Recursively walk the tile hierarchy, following EXTERNAL tileset.json
+  // references (PLATEAU nests per-district tilesets this way). Leaves are
+  // tiles whose content is a real b3dm/glb. Async because external
+  // tilesets must be fetched.
   const leaves = [];
-  function walk(tile, inherited) {
-    const region = tile.boundingVolume?.region;
+  const visited = new Set();   // guard against cyclic external refs
+
+  async function walk(tile, inherited, baseUrl) {
+    const region = tile.boundingVolume && tile.boundingVolume.region;
     if (!tileRegionIntersects(region, bb)) return;
+
     const xform = inherited.clone();
-    if (tile.transform) {
-      const m = new THREE.Matrix4().fromArray(tile.transform);
-      xform.multiply(m);
+    if (tile.transform) xform.multiply(new THREE.Matrix4().fromArray(tile.transform));
+
+    // Recurse into in-tileset children first.
+    if (Array.isArray(tile.children) && tile.children.length > 0) {
+      for (const c of tile.children) await walk(c, xform, baseUrl);
+      // A tile can carry BOTH children and content; PLATEAU usually puts
+      // the geometry only on the deepest level, so if it has children we
+      // don't also load its own content (avoids double-draw).
+      return;
     }
-    const hasChildren = Array.isArray(tile.children) && tile.children.length > 0;
-    if (hasChildren) {
-      for (const c of tile.children) walk(c, xform);
-    } else if (tile.content?.uri) {
-      leaves.push({ uri: tile.content.uri, transform: xform, _idx: leaves.length });
+
+    const uri = contentUri(tile);
+    if (!uri) return;
+    const absUrl = resolveUrl(uri, baseUrl);
+
+    if (/\.json$/i.test(uri)) {
+      // External tileset reference → fetch and recurse.
+      if (visited.has(absUrl)) return;
+      visited.add(absUrl);
+      try {
+        const sub = await fetch(absUrl).then(r => r.json());
+        const subBase = absUrl.substring(0, absUrl.lastIndexOf('/') + 1);
+        if (sub && sub.root) await walk(sub.root, xform, subBase);
+      } catch (e) {
+        console.warn('PLATEAU external tileset failed:', absUrl, e.message);
+      }
+    } else {
+      // Real content tile (b3dm / glb). Store its ABSOLUTE url so loadOne
+      // doesn't need to know which nested tileset it came from.
+      leaves.push({ url: absUrl, transform: xform, _idx: leaves.length });
     }
   }
-  walk(tileset.root, new THREE.Matrix4());
 
+  const rootTileset = await fetch(tilesetUrl).then(r => r.json());
+  const rootBase = tilesetUrl.substring(0, tilesetUrl.lastIndexOf('/') + 1);
+  await walk(rootTileset.root, new THREE.Matrix4(), rootBase);
+
+  console.log(`[PLATEAU] collected ${leaves.length} content tile(s) for the bbox`);
   if (leaves.length === 0) {
     onProgress && onProgress(1, 'PLATEAU: bbox 範囲に該当タイル無し');
     return null;
@@ -520,10 +562,18 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
 
   async function loadOne(leaf) {
     try {
-      const buffer = await fetch(baseUrl + leaf.uri).then(r => r.arrayBuffer());
-      const glb = parseB3dm(buffer);
+      const buffer = await fetch(leaf.url).then(r => r.arrayBuffer());
+      // Content can be b3dm (28-byte header + glb) or a bare .glb. Detect
+      // by magic: "b3dm" → strip header, "glTF" → use as-is.
+      const magic = String.fromCharCode(
+        new DataView(buffer).getUint8(0), new DataView(buffer).getUint8(1),
+        new DataView(buffer).getUint8(2), new DataView(buffer).getUint8(3));
+      const glb = magic === 'b3dm' ? parseB3dm(buffer) : buffer;
+      // GLTFLoader needs a resource path for any EXTERNAL textures/bins the
+      // glb references relatively (PLATEAU textured tiles often do).
+      const resPath = leaf.url.substring(0, leaf.url.lastIndexOf('/') + 1);
       const gltf = await new Promise((resolve, reject) => {
-        loader.parse(glb, '', resolve, reject);
+        loader.parse(glb, resPath, resolve, reject);
       });
       // 3D Tiles convention: glTF assets are Y-up. Tile transforms in ECEF
       // already include the orientation flip, so we just apply the tile
@@ -575,13 +625,13 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       // tell from console whether textures actually exist on disk vs.
       // we're rendering a no-texture variant.
       if (leaf._idx < 3 && leafTotal > 0) {
-        console.log(`[PLATEAU tile ${leaf.uri}] ${leafTextured}/${leafTotal} meshes carry a diffuse texture`);
+        console.log(`[PLATEAU tile #${leaf._idx}] ${leafTextured}/${leafTotal} meshes carry a diffuse texture`);
       }
       group.add(gltf.scene);
     } catch (e) {
       // Skip individual tile failures; PLATEAU CDN occasionally serves
       // partial responses and one bad tile shouldn't take down the city.
-      console.warn('PLATEAU tile failed:', leaf.uri, e.message);
+      console.warn('PLATEAU tile failed:', leaf.url, e.message);
     }
     done++;
     onProgress && onProgress(done / leaves.length, `PLATEAU タイル ${done}/${leaves.length}`);
@@ -598,5 +648,13 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, pump));
 
+  // If every tile failed (CDN down, all b3dm corrupt, etc) the group is
+  // empty — return null so app.js falls back to OSM instead of claiming
+  // "PLATEAU で表示中" over a blank scene.
+  if (group.children.length === 0) {
+    console.warn('[PLATEAU] all tiles failed to load — falling back to OSM');
+    return null;
+  }
+  console.log(`[PLATEAU] rendered ${group.children.length} tile(s)`);
   return group;
 }
