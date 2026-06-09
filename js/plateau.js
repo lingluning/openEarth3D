@@ -473,6 +473,51 @@ function geodeticToEcef(latDeg, lonDeg, h = 0) {
 
 // Build a 4×4 transform that takes ECEF coordinates to our local frame:
 // +X east, +Y up, +Z south, NW corner of `bb` at (0, 0, 0).
+// ENU-at-ECEF-point → ECEF rotation+translation matrix. This is the
+// per-tile transform Cesium calls `eastNorthUpToFixedFrame`. PLATEAU's
+// b3dm tiles store vertices in a glTF Y-up local frame where
+// +X = east, +Y = up, +Z = south at the tile's RTC_CENTER. So the
+// matrix that turns a glTF vertex into an ECEF position has columns
+// [east, up, -north] (rotation) and RTC_CENTER (translation).
+//
+// A naive `rotX(+90°)` only swaps glTF Y↔Z and leaves the result
+// expressed in the ECEF X/Y/Z basis — but ECEF axes are NOT east/up/
+// north anywhere except the equator at lon=0. At Tokyo (35.7°N) the
+// residual mismatch is ~54° of tilt, which produced the half-buried /
+// sloped buildings.
+function _enuToEcefMatrix(ecef) {
+  const x = ecef[0], y = ecef[1], z = ecef[2];
+  // WGS84
+  const a  = 6378137.0;
+  const e2 = 0.00669437999014;
+  const p  = Math.sqrt(x * x + y * y);
+  const lon = Math.atan2(y, x);
+  // Bowring's iterative geodetic latitude — converges in 3-4 iters.
+  let lat = Math.atan2(z, p * (1 - e2));
+  for (let i = 0; i < 5; i++) {
+    const sLat = Math.sin(lat);
+    const N = a / Math.sqrt(1 - e2 * sLat * sLat);
+    const h = p / Math.cos(lat) - N;
+    lat = Math.atan2(z, p * (1 - e2 * N / (N + h)));
+  }
+  const sLat = Math.sin(lat), cLat = Math.cos(lat);
+  const sLon = Math.sin(lon), cLon = Math.cos(lon);
+  // ENU basis vectors expressed in ECEF.
+  const ex = -sLon,        ey =  cLon,        ez = 0;
+  const nx = -sLat * cLon, ny = -sLat * sLon, nz = cLat;
+  const ux =  cLat * cLon, uy =  cLat * sLon, uz = sLat;
+  // glTF X→east, glTF Y→up, glTF Z→south(=-north). Columns are basis
+  // images; translation = RTC_CENTER.
+  const m = new THREE.Matrix4();
+  m.set(
+    ex, ux, -nx, x,
+    ey, uy, -ny, y,
+    ez, uz, -nz, z,
+    0,  0,   0,  1
+  );
+  return m;
+}
+
 function buildEcefToLocalMatrix(bb) {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
   const lat0 = (bb.n + bb.s) / 2;
@@ -686,26 +731,18 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       const gltf = await new Promise((resolve, reject) => {
         loader.parse(glb, resPath, resolve, reject);
       });
-      // Per-tile transform to absolute ECEF. Order (applied right-to-left
-      // to a vertex):
-      //   1. UP_AXIS  — glTF is Y-up, the 3D Tiles / ECEF frame is Z-up.
-      //      Every hand-rolled loader that skips this gets buildings that
-      //      look upright among themselves but sit tilted + displaced once
-      //      the group's ECEF→local matrix is applied. rotX(+90°) maps
-      //      glTF +Y (up) to +Z.
-      //   2. translate(RTC_CENTER) — vertices are stored relative to this
-      //      ECEF anchor (CESIUM_RTC / b3dm RTC_CENTER). Added AFTER the
-      //      up-axis rotation because the centre is an ECEF (Z-up) point.
-      //   3. leaf.transform — accumulated tile transforms (usually identity
-      //      for PLATEAU leaves).
-      const UP_AXIS = new THREE.Matrix4().makeRotationX(Math.PI / 2);
+      // Per-tile transform: glTF vertex → ECEF → group local-metres.
+      // Vertices are stored in a glTF Y-up local frame with axes
+      // (X=east, Y=up, Z=south) at the tile's RTC_CENTER. The matrix
+      // that maps that frame back to ECEF is exactly Cesium's
+      // `eastNorthUpToFixedFrame(RTC_CENTER)`: rotation columns
+      // [east, up, -north] expressed in ECEF, plus RTC_CENTER as
+      // translation. leaf.transform is the accumulated 3D Tiles parent
+      // transform (usually identity for PLATEAU leaves).
       const tileXform = leaf.transform.clone();
       if (rtcCenter) {
-        tileXform.multiply(
-          new THREE.Matrix4().makeTranslation(rtcCenter[0], rtcCenter[1], rtcCenter[2])
-        );
+        tileXform.multiply(_enuToEcefMatrix(rtcCenter));
       }
-      tileXform.multiply(UP_AXIS);
       if (leaf._idx === 0) {
         console.log('[PLATEAU] tile#0 RTC_CENTER =', rtcCenter,
           '| leaf.transform identity =', leaf.transform.equals(new THREE.Matrix4()));
