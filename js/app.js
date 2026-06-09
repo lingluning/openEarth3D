@@ -413,26 +413,32 @@ async function run() {
           const plateauGroup = await loadPlateauBuildings(plateauPick.url, bb,
             (p, label) => setProgress(0.80 + p * 0.15, label));
           if (plateauGroup) {
-            // Vertical alignment. PLATEAU vertices carry ELLIPSOIDAL height
-            // (ECEF), our terrain orthometric DEM height (above sea level);
-            // the geoid undulation (~36-40 m in Japan) makes buildings float.
-            // Drop the group so its lowest point sits on the terrain centre.
+            // Vertical alignment, robust to the residual ~15° tilt still in
+            // the PLATEAU transform. Aligning the global bbox bottom (one
+            // tilted corner) over-shoots. Instead cast a ray straight DOWN
+            // through the scene CENTRE onto the PLATEAU geometry and anchor
+            // the lowest hit there (≈ ground at centre) to the terrain at
+            // centre. Local sampling makes it tilt-tolerant — the middle of
+            // the view sits right even while the corners still slope until
+            // the transform is fully fixed.
             plateauGroup.updateMatrixWorld(true);
-            const box = new THREE.Box3().setFromObject(plateauGroup);
-            if (isFinite(box.min.y)) {
-              const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
-              const shift = terrainCenterY - box.min.y;
-              // Sanity clamp: a correct transform leaves only the geoid
-              // offset (tens of metres). A shift of hundreds of metres means
-              // the tile transform is still wrong — don't amplify it, log so
-              // it's diagnosable, and leave the group where the transform put
-              // it (closer to correct than a huge bogus shift).
-              if (Math.abs(shift) < 300) {
-                plateauGroup.position.y += shift;
-                console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m`);
-              } else {
-                console.warn(`[PLATEAU] vertical shift ${shift.toFixed(0)} m too large — transform likely still wrong; not applying`);
-              }
+            const cx = xSize / 2, cz = zSize / 2;
+            const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
+            const downRay = new THREE.Raycaster(
+              new THREE.Vector3(cx, 1e5, cz), new THREE.Vector3(0, -1, 0));
+            const hits = downRay.intersectObject(plateauGroup, true);
+            let shift = null;
+            if (hits.length) {
+              // Farthest hit along -Y = lowest surface ≈ ground at centre.
+              shift = terrainCenterY - hits[hits.length - 1].point.y;
+            } else {
+              // No building directly at centre — fall back to bbox bottom.
+              const box = new THREE.Box3().setFromObject(plateauGroup);
+              if (isFinite(box.min.y)) shift = terrainCenterY - box.min.y;
+            }
+            if (shift != null && Math.abs(shift) < 2000) {
+              plateauGroup.position.y += shift;
+              console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m (centre-ray)`);
             }
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;
