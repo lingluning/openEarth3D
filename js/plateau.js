@@ -373,12 +373,17 @@ function _plateauFlatten(json) {
 
 async function fetchPlateauTilesetUrl(cityCode) {
   if (_PLATEAU_LOOKUP_CACHE[cityCode] !== undefined) return _PLATEAU_LOOKUP_CACHE[cityCode];
-  let cached = null;
-  try { cached = JSON.parse(sessionStorage.getItem('plateau:v3:' + cityCode) || 'null'); } catch {}
-  if (cached !== null) {
-    _PLATEAU_LOOKUP_CACHE[cityCode] = cached;
-    return cached;
-  }
+  // Distinguish "no cache entry" (getItem → null) from a cached negative
+  // result (the string 'null'): both used to parse to null, so negative
+  // results were re-queried on every run.
+  try {
+    const raw = sessionStorage.getItem('plateau:v3:' + cityCode);
+    if (raw !== null) {
+      const cached = JSON.parse(raw);
+      _PLATEAU_LOOKUP_CACHE[cityCode] = cached;
+      return cached;
+    }
+  } catch {}
 
   let result = null;
   try {
@@ -568,9 +573,12 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
   onProgress && onProgress(0, 'PLATEAU カタログ読込中…');
 
   // Resolve a content reference (relative or absolute) against a base URL.
+  // Use the URL constructor so "../", "./" and root-relative "/x" refs all
+  // resolve correctly — naive base+ref concatenation builds broken URLs
+  // for those and the tiles silently fail to load.
   const resolveUrl = (ref, base) => {
-    if (/^https?:\/\//i.test(ref)) return ref;
-    return base + ref;
+    try { return new URL(ref, base).href; }
+    catch { return /^https?:\/\//i.test(ref) ? ref : base + ref; }
   };
 
   // Pull the content URI from a tile, handling both 3D Tiles 1.0
@@ -589,43 +597,49 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
   const leaves = [];
   const visited = new Set();   // guard against cyclic external refs
 
-  async function walk(tile, inherited, baseUrl, inheritedRegion) {
+  async function walk(tile, inherited, baseUrl, inheritedRegion, inheritedRefine) {
     const region = (tile.boundingVolume && tile.boundingVolume.region) || inheritedRegion;
     if (!tileRegionIntersects(region, bb)) return;
 
+    // `refine` is inherited down the tree per the 3D Tiles spec.
+    const refine = String(tile.refine || inheritedRefine || 'REPLACE').toUpperCase();
     const xform = inherited.clone();
     if (tile.transform) xform.multiply(new THREE.Matrix4().fromArray(tile.transform));
 
-    // Recurse into in-tileset children first.
-    if (Array.isArray(tile.children) && tile.children.length > 0) {
-      for (const c of tile.children) await walk(c, xform, baseUrl, region);
-      // A tile can carry BOTH children and content; PLATEAU usually puts
-      // the geometry only on the deepest level, so if it has children we
-      // don't also load its own content (avoids double-draw).
-      return;
+    const uri = contentUri(tile);
+    const hasChildren = Array.isArray(tile.children) && tile.children.length > 0;
+    // A tile can carry BOTH children and content. With REPLACE refinement
+    // the parent's content is a coarser duplicate of its children — loading
+    // both double-draws. With ADD refinement the parent content is part of
+    // the model and must be loaded alongside the children, or buildings
+    // silently disappear.
+    const loadOwnContent = uri && (!hasChildren || refine === 'ADD');
+
+    if (loadOwnContent) {
+      const absUrl = resolveUrl(uri, baseUrl);
+      if (/\.json($|\?)/i.test(absUrl)) {
+        // External tileset reference → fetch and recurse.
+        if (!visited.has(absUrl)) {
+          visited.add(absUrl);
+          try {
+            const sub = await fetch(absUrl).then(r => r.json());
+            const subBase = absUrl.substring(0, absUrl.lastIndexOf('/') + 1);
+            if (sub && sub.root) await walk(sub.root, xform, subBase, region, refine);
+          } catch (e) {
+            console.warn('PLATEAU external tileset failed:', absUrl, e.message);
+          }
+        }
+      } else {
+        // Real content tile (b3dm / glb). Store its ABSOLUTE url so loadOne
+        // doesn't need to know which nested tileset it came from. Carry the
+        // tile's bounding region so loadOne has a fallback ECEF anchor when
+        // the b3dm has no RTC_CENTER and no CESIUM_RTC extension.
+        leaves.push({ url: absUrl, transform: xform, region, _idx: leaves.length });
+      }
     }
 
-    const uri = contentUri(tile);
-    if (!uri) return;
-    const absUrl = resolveUrl(uri, baseUrl);
-
-    if (/\.json$/i.test(uri)) {
-      // External tileset reference → fetch and recurse.
-      if (visited.has(absUrl)) return;
-      visited.add(absUrl);
-      try {
-        const sub = await fetch(absUrl).then(r => r.json());
-        const subBase = absUrl.substring(0, absUrl.lastIndexOf('/') + 1);
-        if (sub && sub.root) await walk(sub.root, xform, subBase, region);
-      } catch (e) {
-        console.warn('PLATEAU external tileset failed:', absUrl, e.message);
-      }
-    } else {
-      // Real content tile (b3dm / glb). Store its ABSOLUTE url so loadOne
-      // doesn't need to know which nested tileset it came from. Carry the
-      // tile's bounding region so loadOne has a fallback ECEF anchor when
-      // the b3dm has no RTC_CENTER and no CESIUM_RTC extension.
-      leaves.push({ url: absUrl, transform: xform, region, _idx: leaves.length });
+    if (hasChildren) {
+      for (const c of tile.children) await walk(c, xform, baseUrl, region, refine);
     }
   }
 
