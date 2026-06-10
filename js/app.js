@@ -209,14 +209,20 @@ function setExportEnabled(enabled) {
 // reproduces the exact view. Hash (not query) keeps it client-side only.
 function buildShareUrl() {
   const g = id => (document.getElementById(id) || {}).value;
-  const p = new URLSearchParams({
+  const params = {
     lat: g('latInput'), lon: g('lonInput'), km: g('rangeKm'),
     mesh: g('meshDetail'), src: g('photoSource'), tex: g('textureQuality'),
     exag: g('vertExag'),
     bldg: document.getElementById('toggleBuildings').checked ? '1' : '0',
     plateau: document.getElementById('togglePlateau').checked ? '1' : '0',
-  });
-  return location.origin + location.pathname + '#' + p.toString();
+  };
+  // Custom aerial source list must travel in the share link, otherwise
+  // sharing a view with src=custom hands the recipient a 'custom' mode
+  // with no usable source and aerial fetch fails to reproduce the view.
+  // Only include when non-empty to keep the URL short.
+  const customs = (g('customAerialJson') || '').trim();
+  if (customs) params.customs = customs;
+  return location.origin + location.pathname + '#' + new URLSearchParams(params).toString();
 }
 
 // Apply settings from the URL hash on load. Returns true if anything was
@@ -230,6 +236,10 @@ function applyHashState() {
   set('textureQuality', 'tex'); set('vertExag', 'exag');
   if (p.get('bldg') != null) document.getElementById('toggleBuildings').checked = p.get('bldg') === '1';
   if (p.get('plateau') != null) document.getElementById('togglePlateau').checked = p.get('plateau') === '1';
+  if (p.get('customs') != null) {
+    document.getElementById('customAerialJson').value = p.get('customs');
+    validateCustomAerialJson();
+  }
   // Labels must reflect what the range input ACTUALLY accepted — a
   // malformed hash (#km=abc) is rejected by the input element but
   // parseFloat(p.get(...)) would still render "NaN km".
