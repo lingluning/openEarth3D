@@ -636,7 +636,7 @@ function tileRegionIntersects(region, bb) {
 // mesh. Positions are baked in WORLD space and the new meshes attach to
 // the identity root, so downstream transforms (vertical-align shift,
 // cull) behave exactly as before.
-function _autoTexturePlateau(root, aerialTex, bb, facadePalette) {
+function _autoTexturePlateau(root, aerialTex, bb, facadePalette, cc0Walls) {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
   const targets = [];
   root.updateMatrixWorld(true);
@@ -649,18 +649,29 @@ function _autoTexturePlateau(root, aerialTex, bb, facadePalette) {
 
   const roofMat = new THREE.MeshLambertMaterial({ map: aerialTex, side: THREE.DoubleSide });
   roofMat.name = 'plateau_roof_aerial';
-  // Wall tones: the Mapillary neighbourhood palette when available (see
-  // server/facade-server.js), else the default light cartoon set.
-  const WALL_TONES = (Array.isArray(facadePalette) && facadePalette.length)
-    ? facadePalette
-    : [0xeae4d8, 0xe3dcd2, 0xefe8da, 0xe0d8cc];
-  const wallMats = WALL_TONES.map((tone, i) => {
-    const mat = (typeof makeFacadeTexture === 'function')
-      ? new THREE.MeshLambertMaterial({ map: makeFacadeTexture(tone, 'office', i) })
-      : new THREE.MeshLambertMaterial({ color: tone });
-    mat.name = 'plateau_wall_facade_' + i;
-    return mat;
-  });
+  // Wall materials: CC0 photo textures (when preloaded) win → Mapillary
+  // palette → procedural cartoon. PLATEAU's white model has no per-mesh
+  // building type info, so we cycle through the available CC0 textures
+  // (concrete/brick/metal mix) and let geographic variety emerge.
+  let wallMats;
+  if (cc0Walls && cc0Walls.size) {
+    wallMats = [...cc0Walls.values()].map((tex, i) => {
+      const mat = new THREE.MeshLambertMaterial({ map: tex });
+      mat.name = 'plateau_wall_cc0_' + i;
+      return mat;
+    });
+  } else {
+    const WALL_TONES = (Array.isArray(facadePalette) && facadePalette.length)
+      ? facadePalette
+      : [0xeae4d8, 0xe3dcd2, 0xefe8da, 0xe0d8cc];
+    wallMats = WALL_TONES.map((tone, i) => {
+      const mat = (typeof makeFacadeTexture === 'function')
+        ? new THREE.MeshLambertMaterial({ map: makeFacadeTexture(tone, 'office', i) })
+        : new THREE.MeshLambertMaterial({ color: tone });
+      mat.name = 'plateau_wall_facade_' + i;
+      return mat;
+    });
+  }
 
   const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
   const ab = new THREE.Vector3(), ac = new THREE.Vector3(), nrm = new THREE.Vector3();
@@ -1011,7 +1022,7 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress, opts) {
   // worst case we keep the plain white model.
   if (opts && opts.aerialTex) {
     try {
-      _autoTexturePlateau(root, opts.aerialTex, bb, opts.facadePalette);
+      _autoTexturePlateau(root, opts.aerialTex, bb, opts.facadePalette, opts.cc0Walls);
     } catch (e) {
       console.warn('[PLATEAU] auto-texture failed (keeping white model):', e);
     }

@@ -82,6 +82,8 @@ function persistInputs() {
       photoSource: document.getElementById('photoSource').value,
       customAerialJson: document.getElementById('customAerialJson').value,
       facadeServerUrl: (document.getElementById('facadeServerUrl') || {}).value || '',
+      cc0Facades: !!(document.getElementById('toggleCc0Facades') || {}).checked,
+      cc0OverrideJson: (document.getElementById('cc0OverrideJson') || {}).value || '',
       textureQuality: document.getElementById('textureQuality').value,
       meshDetail: document.getElementById('meshDetail').value,
       hour: document.getElementById('timeOfDay').value,
@@ -113,6 +115,12 @@ function restoreInputs() {
     }
     if (v.facadeServerUrl != null && document.getElementById('facadeServerUrl')) {
       document.getElementById('facadeServerUrl').value = v.facadeServerUrl;
+    }
+    if (typeof v.cc0Facades === 'boolean' && document.getElementById('toggleCc0Facades')) {
+      document.getElementById('toggleCc0Facades').checked = v.cc0Facades;
+    }
+    if (v.cc0OverrideJson != null && document.getElementById('cc0OverrideJson')) {
+      document.getElementById('cc0OverrideJson').value = v.cc0OverrideJson;
     }
     if (v.textureQuality) document.getElementById('textureQuality').value = v.textureQuality;
     if (v.meshDetail) document.getElementById('meshDetail').value = v.meshDetail;
@@ -455,11 +463,23 @@ async function run() {
         })().catch(e => { console.warn('[FACADE] palette fetch failed:', e.message); return null; })
       : Promise.resolve(null);
 
-    const [bRes, gRes, plateauPicks, facadePalette] = await Promise.all([
+    // Optional CC0 photo-texture pack for facades (js/cc0textures.js).
+    // Loaded in parallel with everything else; missing/slow URLs fall
+    // back to the procedural canvas per material.
+    const cc0On = !!(document.getElementById('toggleCc0Facades') || {}).checked;
+    if (cc0On && typeof applyCc0CatalogOverride === 'function') {
+      applyCc0CatalogOverride((document.getElementById('cc0OverrideJson') || {}).value || '');
+    }
+    const cc0Promise = cc0On && typeof preloadCc0Facades === 'function'
+      ? preloadCc0Facades(null).catch(e => { console.warn('[CC0] preload failed:', e); return null; })
+      : Promise.resolve(null);
+
+    const [bRes, gRes, plateauPicks, facadePalette, cc0Walls] = await Promise.all([
       Promise.allSettled([fetchBuildings(bb)]).then(r => r[0]),
       Promise.allSettled([fetchGroundFeatures(bb)]).then(r => r[0]),
       plateauPromise,
       facadePromise,
+      cc0Promise,
     ]);
     const bElems = bRes.status === 'fulfilled' ? bRes.value : [];
     const gElems = gRes.status === 'fulfilled' ? gRes.value : [];
@@ -499,7 +519,7 @@ async function run() {
             try {
               const g = await loadPlateauBuildings(pick.url, bb, (p, label) =>
                 setProgress(0.80 + ((k + p) / plateauPicks.length) * 0.15, label),
-                { aerialTex, facadePalette });
+                { aerialTex, facadePalette, cc0Walls });
               if (g) plateauGroup.add(g);
             } catch (e) {
               console.warn(`PLATEAU ${pick.city.name} load failed:`, e);
@@ -634,7 +654,7 @@ async function run() {
       if (!usedPlateau) {
         setProgress(0.88, '建物3D生成中（OSM）…');
         const parsed = parseBuildings(bElems, bb);
-        currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag, { aerialTex, facadePalette });
+        currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag, { aerialTex, facadePalette, cc0Walls });
         currentBuildingData = parsed;   // for click-to-inspect
         currentBB = bb;
         scene.add(currentBuildings);

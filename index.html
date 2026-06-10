@@ -174,6 +174,20 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
           </div>
           <div id="customAerialStatus" style="font-size:0.70rem;color:#90caf9;margin-top:3px;min-height:14px"></div>
         </details>
+        <div class="toggle-row" style="margin-top:8px">
+          <input type="checkbox" id="toggleCc0Facades"/>
+          <label for="toggleCc0Facades" style="margin:0">CC0 写真テクスチャを使用（PolyHaven）</label>
+        </div>
+        <details style="margin-top:4px">
+          <summary style="font-size:0.74rem;color:#4fc3f7;cursor:pointer;outline:none;user-select:none">CC0 マッピング上書き（JSON）</summary>
+          <textarea id="cc0OverrideJson" rows="4"
+                    placeholder='{"office":{"url":"https://...jpg","worldSize":3,"label":"my pack"}}'
+                    style="width:100%;margin-top:4px;background:#0d0d1a;border:1px solid #4fc3f7;color:#e0e0f0;padding:6px;border-radius:5px;font-size:0.72rem;font-family:'Consolas','Menlo',monospace;resize:vertical"></textarea>
+          <div style="font-size:0.70rem;color:#7a9ab8;margin-top:3px;line-height:1.5">
+            建物タイプ → 自作 CC0 テクスチャ URL。worldSize はメートル/タイル。
+            未指定タイプは PolyHaven デフォルトを使用。
+          </div>
+        </details>
         <details style="margin-top:6px">
           <summary style="font-size:0.74rem;color:#4fc3f7;cursor:pointer;outline:none;user-select:none">街並み配色（Mapillary・実験的）</summary>
           <label style="margin-top:4px">ファサードサーバURL</label>
@@ -297,14 +311,15 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 <!-- JSZip for DAE+texture bundling -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-<script src="js/coords.js?v=review14"></script>
-<script src="js/cache.js?v=review14"></script>
-<script src="js/terrain.js?v=review14"></script>
-<script src="js/buildings.js?v=review14"></script>
-<script src="js/features.js?v=review14"></script>
-<script src="js/plateau.js?v=review14"></script>
-<script src="js/export.js?v=review14"></script>
-<script src="js/scene.js?v=review14"></script>
-<script src="js/app.js?v=review14"></script>
+<script src="js/coords.js?v=review15"></script>
+<script src="js/cache.js?v=review15"></script>
+<script src="js/terrain.js?v=review15"></script>
+<script src="js/cc0textures.js?v=review15"></script>
+<script src="js/buildings.js?v=review15"></script>
+<script src="js/features.js?v=review15"></script>
+<script src="js/plateau.js?v=review15"></script>
+<script src="js/export.js?v=review15"></script>
+<script src="js/scene.js?v=review15"></script>
+<script src="js/app.js?v=review15"></script>
 </body>
 </html>

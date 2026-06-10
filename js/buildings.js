@@ -682,6 +682,7 @@ function resetBuildingCaches() {
   _roofEquipMat = null;  // disposed by clearSceneObjects; rebuild next run
   _aerialRoof = null;
   _facadePalette = null;
+  _cc0Walls = null;
 }
 
 // ── Aerial-photo roof projection (Auto-Create-bldg-lod2-tool style) ────────
@@ -699,6 +700,12 @@ let _aerialRoof = null;   // { mat, xSize, zSize } for the current run
 // come from this pool instead of the per-type style defaults.
 let _facadePalette = null;   // array of int hex, or null
 
+// CC0 photo-texture map for the current run (see js/cc0textures.js).
+// type → THREE.Texture. When set, _getWallMat builds materials with the
+// photo texture instead of the procedural canvas; missing types or load
+// failures still fall back to procedural per-call.
+let _cc0Walls = null;
+
 function _aerialUVRoof(geo) {
   const pos = geo.attributes.position;
   const uvs = new Float32Array(pos.count * 2);
@@ -713,6 +720,18 @@ function _aerialUVRoof(geo) {
 function _getWallMat(style, bucket = 0) {
   const off = HSL_OFFSETS[bucket % STYLE_VARIANTS];
   const wallHex = _jitterHexHSL(style.wall, off.dh, off.ds, off.dl);
+  // CC0 photo-texture branch: one shared material per building TYPE
+  // (the photo carries every detail — windows, panels, weathering — so
+  // we don't bucket-jitter it). Falls back to procedural for any type
+  // that didn't load successfully.
+  if (_cc0Walls && _cc0Walls.has(style.type)) {
+    const ckey = `cc0_${style.type}`;
+    if (_matCache.wall[ckey]) return _matCache.wall[ckey];
+    const mat = new THREE.MeshLambertMaterial({ map: _cc0Walls.get(style.type) });
+    mat.name = `wall_${ckey}`;
+    _matCache.wall[ckey] = mat;
+    return mat;
+  }
   const key = `${wallHex.toString(16)}_${style.type}_${bucket}`;
   if (_matCache.wall[key]) return _matCache.wall[key];
   const tex = makeFacadeTexture(wallHex, style.type, bucket);
@@ -1161,6 +1180,8 @@ function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag, opts) {
   }
   _facadePalette = (opts && Array.isArray(opts.facadePalette) && opts.facadePalette.length)
     ? opts.facadePalette : null;
+  _cc0Walls = (opts && opts.cc0Walls instanceof Map && opts.cc0Walls.size)
+    ? opts.cc0Walls : null;
   // Collect every geometry part across all buildings, keyed by material.
   const byMaterial = new Map();
   for (const b of buildings) {
