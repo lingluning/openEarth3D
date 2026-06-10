@@ -516,44 +516,58 @@ async function run() {
             // ── Vertical alignment ───────────────────────────────────────
             // PLATEAU's baked heights and our DEM disagree by a near-
             // constant vertical offset (geoid vs ellipsoid conventions in
-            // the tiling pipeline — the sign/size varies per dataset, so
+            // the tiling pipeline — sign/size varies per dataset, so
             // MEASURE it, never assume ~36 m). One global Y shift aligns.
             //
-            // Method: rain ~200 vertical rays over the map; for each ray
-            // take the LOWEST hit on the PLATEAU group (≈ building base at
-            // that column) minus the terrain height at the SAME (x,z), and
-            // use the MEDIAN of those per-column deltas.
-            //   · same-location comparison — slopes don't bias it
-            //   · lowest-hit-per-ray — tower roofs don't matter
-            //   · median — basement/underground outliers don't matter.
-            // (Earlier attempts: a single centre ray hit one tower roof and
-            // buried the city 174 m; per-MESH bbox minima looked like
-            // building bases but each PLATEAU mesh merges dozens of
-            // buildings incl. underground parts, so the "bases" sat ~38 m
-            // too low and the whole city floated by that much.)
-            const median = arr => {
-              if (!arr.length) return null;
-              const s = arr.slice().sort((a, b) => a - b);
-              const m = s.length >> 1;
-              return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-            };
-            const RAY_N = 15;
-            const DOWN = new THREE.Vector3(0, -1, 0);
-            const ray = new THREE.Raycaster();
+            // Method: for a subsample of geometry VERTICES, compute
+            // delta = terrainY(at the vertex's x,z) − vertexY, and take
+            // the MODE of the delta histogram (1 m bins, refined by the
+            // median within ±2 m of the peak).
+            //   Wall-BOTTOM vertices touch the ground, so across the whole
+            //   city their deltas agree on one constant — the datum offset
+            //   we want — regardless of terrain slope. Roof vertices smear
+            //   across building heights (diffuse), underground vertices
+            //   are a minority: neither can outvote the base cluster.
+            // (Failed predecessors, kept for the archaeology: a single
+            // centre ray hit a tower roof → city buried 174 m; per-mesh
+            // bbox minima include merged underground parts → city floated
+            // 38 m; ray-grid lowest-hits found mostly ROOFS because LOD2
+            // buildings often have no bottom face and walls are parallel
+            // to vertical rays → city buried 67 m.)
+            const _v = new THREE.Vector3();
             const deltas = [];
-            for (let i = 1; i < RAY_N; i++) {
-              for (let j = 1; j < RAY_N; j++) {
-                ray.set(new THREE.Vector3(xSize * i / RAY_N, 1e5, zSize * j / RAY_N), DOWN);
-                const hits = ray.intersectObject(plateauGroup, true);
-                if (!hits.length) continue;
-                const terrainY = getElevAt(elevGrid, meshN, i / RAY_N, j / RAY_N) * vertExag;
-                deltas.push(terrainY - hits[hits.length - 1].point.y);
+            plateauGroup.traverse(o => {
+              if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+              const pos = o.geometry.attributes.position;
+              const step = Math.max(1, Math.floor(pos.count / 2000));
+              for (let i = 0; i < pos.count; i += step) {
+                _v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+                if (_v.x < 0 || _v.x > xSize || _v.z < 0 || _v.z > zSize) continue;
+                deltas.push(
+                  getElevAt(elevGrid, meshN, _v.x / xSize, _v.z / zSize) * vertExag - _v.y);
+              }
+            });
+            let shift = null;
+            if (deltas.length) {
+              // Geoid undulation is within ±110 m anywhere on Earth; wider
+              // deltas are roofs of skyscrapers / deep structures.
+              const counts = new Map();
+              for (const d of deltas) {
+                if (d < -120 || d > 120) continue;
+                const b = Math.round(d);
+                counts.set(b, (counts.get(b) || 0) + 1);
+              }
+              let peak = null, peakCount = 0;
+              for (const [b, c] of counts) {
+                if (c > peakCount) { peakCount = c; peak = b; }
+              }
+              if (peak != null) {
+                const near = deltas.filter(d => Math.abs(d - peak) <= 2).sort((a, b) => a - b);
+                shift = near[near.length >> 1];
               }
             }
-            let shift = median(deltas);
             if (shift == null) {
-              // No building under any ray (sparse rural tile) — fall back
-              // to bbox-bottom vs centre terrain.
+              // Degenerate geometry — fall back to bbox bottom vs centre.
               const box = new THREE.Box3().setFromObject(plateauGroup);
               const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
               if (isFinite(box.min.y)) shift = terrainCenterY - box.min.y;
@@ -561,7 +575,7 @@ async function run() {
             if (shift != null && Math.abs(shift) < 2000) {
               plateauGroup.position.y += shift;
               console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m ` +
-                `(median of ${deltas.length} ray deltas)`);
+                `(vertex-histogram mode of ${deltas.length} samples)`);
             }
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;
