@@ -515,59 +515,69 @@ async function run() {
 
             // ── Vertical alignment ───────────────────────────────────────
             // PLATEAU's baked heights and our DEM disagree by a near-
-            // constant vertical offset (geoid vs ellipsoid conventions in
-            // the tiling pipeline — sign/size varies per dataset, so
-            // MEASURE it, never assume ~36 m). One global Y shift aligns.
+            // constant offset (geoid vs ellipsoid; sign/size varies per
+            // dataset — MEASURE it). One global Y shift aligns.
             //
-            // Method: for a subsample of geometry VERTICES, compute
-            // delta = terrainY(at the vertex's x,z) − vertexY, and take
-            // the MODE of the delta histogram (1 m bins, refined by the
-            // median within ±2 m of the peak).
-            //   Wall-BOTTOM vertices touch the ground, so across the whole
-            //   city their deltas agree on one constant — the datum offset
-            //   we want — regardless of terrain slope. Roof vertices smear
-            //   across building heights (diffuse), underground vertices
-            //   are a minority: neither can outvote the base cluster.
-            // (Failed predecessors, kept for the archaeology: a single
-            // centre ray hit a tower roof → city buried 174 m; per-mesh
-            // bbox minima include merged underground parts → city floated
-            // 38 m; ray-grid lowest-hits found mostly ROOFS because LOD2
-            // buildings often have no bottom face and walls are parallel
-            // to vertical rays → city buried 67 m.)
+            // Method: spatial grid (8 m bins) over the map; for each bin
+            // keep the LOWEST sampled vertex Y of any mesh that touches
+            // it. Each non-empty bin's min Y is necessarily a WALL-BOTTOM
+            // (or basement) vertex of whatever building sits in that bin.
+            // The shift is the median of (terrain(bin centre) − bin minY)
+            // across non-empty bins.
+            //   · Per-bin MIN ignores wall-side and roof vertices that
+            //     dominate the global vertex count.
+            //   · Per-bin sampling localises against the LOCAL terrain so
+            //     hills don't bias the result.
+            //   · Cross-bin MEDIAN ignores outlier bins (underground
+            //     parking, basement-only patches, isolated tower roofs).
+            // (Predecessors: centre-ray hit one tower roof, buried 174 m;
+            // per-mesh bbox-mins included merged underground, floated 38 m;
+            // ray-grid lowest-hits missed bottomless LOD2 walls, buried
+            // 67 m; vertex-delta histogram MODE in downtown Tokyo locked
+            // onto the dominant ~30 m-roof CLUSTER, buried 67 m again.)
+            const BIN = 8;   // metres
+            const nx = Math.max(1, Math.ceil(xSize / BIN));
+            const nz = Math.max(1, Math.ceil(zSize / BIN));
+            const binMin = new Float32Array(nx * nz);
+            binMin.fill(Infinity);
             const _v = new THREE.Vector3();
-            const deltas = [];
+            let sampled = 0;
             plateauGroup.traverse(o => {
               if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
               const pos = o.geometry.attributes.position;
-              const step = Math.max(1, Math.floor(pos.count / 2000));
-              for (let i = 0; i < pos.count; i += step) {
+              // Iterate every vertex — per-bin min is robust to dense
+              // sampling but degrades if we miss the wall-bottom corner.
+              for (let i = 0; i < pos.count; i++) {
                 _v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
                 if (_v.x < 0 || _v.x > xSize || _v.z < 0 || _v.z > zSize) continue;
-                deltas.push(
-                  getElevAt(elevGrid, meshN, _v.x / xSize, _v.z / zSize) * vertExag - _v.y);
+                const bx = Math.min(nx - 1, Math.floor(_v.x / BIN));
+                const bz = Math.min(nz - 1, Math.floor(_v.z / BIN));
+                const k = bz * nx + bx;
+                if (_v.y < binMin[k]) binMin[k] = _v.y;
+                sampled++;
               }
             });
-            let shift = null;
-            if (deltas.length) {
-              // Geoid undulation is within ±110 m anywhere on Earth; wider
-              // deltas are roofs of skyscrapers / deep structures.
-              const counts = new Map();
-              for (const d of deltas) {
-                if (d < -120 || d > 120) continue;
-                const b = Math.round(d);
-                counts.set(b, (counts.get(b) || 0) + 1);
-              }
-              let peak = null, peakCount = 0;
-              for (const [b, c] of counts) {
-                if (c > peakCount) { peakCount = c; peak = b; }
-              }
-              if (peak != null) {
-                const near = deltas.filter(d => Math.abs(d - peak) <= 2).sort((a, b) => a - b);
-                shift = near[near.length >> 1];
+            const deltas = [];
+            for (let bz = 0; bz < nz; bz++) {
+              for (let bx = 0; bx < nx; bx++) {
+                const k = bz * nx + bx;
+                const yMin = binMin[k];
+                if (!isFinite(yMin)) continue;
+                const cx = (bx + 0.5) * BIN, cz = (bz + 0.5) * BIN;
+                const terrainY = getElevAt(elevGrid, meshN,
+                  Math.min(1, cx / xSize), Math.min(1, cz / zSize)) * vertExag;
+                const d = terrainY - yMin;
+                // Plausibility filter: geoid undulation is within ±110 m
+                // anywhere on Earth; allow some basement slack.
+                if (d > -150 && d < 60) deltas.push(d);
               }
             }
-            if (shift == null) {
-              // Degenerate geometry — fall back to bbox bottom vs centre.
+            let shift = null;
+            if (deltas.length) {
+              deltas.sort((a, b) => a - b);
+              shift = deltas[deltas.length >> 1];
+            } else {
+              // Degenerate — fall back to bbox bottom vs centre terrain.
               const box = new THREE.Box3().setFromObject(plateauGroup);
               const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
               if (isFinite(box.min.y)) shift = terrainCenterY - box.min.y;
@@ -575,7 +585,7 @@ async function run() {
             if (shift != null && Math.abs(shift) < 2000) {
               plateauGroup.position.y += shift;
               console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m ` +
-                `(vertex-histogram mode of ${deltas.length} samples)`);
+                `(median over ${deltas.length} bins, ${sampled} verts)`);
             }
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;
