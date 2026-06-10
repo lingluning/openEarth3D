@@ -389,7 +389,7 @@ async function fetchPlateauTilesetUrl(cityCode) {
   // result (the string 'null'): both used to parse to null, so negative
   // results were re-queried on every run.
   try {
-    const raw = sessionStorage.getItem('plateau:v3:' + cityCode);
+    const raw = sessionStorage.getItem('plateau:v4:' + cityCode);
     if (raw !== null) {
       const cached = JSON.parse(raw);
       _PLATEAU_LOOKUP_CACHE[cityCode] = cached;
@@ -470,7 +470,7 @@ async function fetchPlateauTilesetUrl(cityCode) {
     console.warn(`[PLATEAU ${cityCode}] catalog query failed:`, e.message || e);
   }
   _PLATEAU_LOOKUP_CACHE[cityCode] = result;
-  try { sessionStorage.setItem('plateau:v3:' + cityCode, JSON.stringify(result)); } catch {}
+  try { sessionStorage.setItem('plateau:v4:' + cityCode, JSON.stringify(result)); } catch {}
   return result;
 }
 
