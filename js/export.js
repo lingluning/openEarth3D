@@ -35,6 +35,56 @@ function _resolveTerrainMesh(terrain) {
   return terrain;
 }
 
+// None of r128's exporters (Collada / GLTF / OBJ) understands
+// InstancedMesh — isMesh is true, so they serialise the base geometry
+// ONCE at the object's own transform and silently drop instanceMatrix.
+// Trees are InstancedMesh, so exports used to contain a single tree at
+// the group origin instead of the forest. Bake every instance into one
+// merged plain BufferGeometry the exporters do understand.
+function _expandInstancedMeshes(rootGroup) {
+  const swaps = [];
+  rootGroup.traverse(o => { if (o.isInstancedMesh) swaps.push(o); });
+  for (const im of swaps) {
+    const base = im.geometry.index ? im.geometry.toNonIndexed() : im.geometry;
+    const posA = base.getAttribute('position');
+    const nrmA = base.getAttribute('normal');
+    const uvA  = base.getAttribute('uv');
+    const count = im.count, vtx = posA.count;
+    const pos = new Float32Array(count * vtx * 3);
+    const nrm = nrmA ? new Float32Array(count * vtx * 3) : null;
+    const uv  = uvA  ? new Float32Array(count * vtx * 2) : null;
+    const m = new THREE.Matrix4(), nm = new THREE.Matrix3(), v = new THREE.Vector3();
+    for (let i = 0; i < count; i++) {
+      im.getMatrixAt(i, m);
+      nm.getNormalMatrix(m);
+      for (let j = 0; j < vtx; j++) {
+        const o3 = (i * vtx + j) * 3;
+        v.fromBufferAttribute(posA, j).applyMatrix4(m);
+        pos[o3] = v.x; pos[o3 + 1] = v.y; pos[o3 + 2] = v.z;
+        if (nrm) {
+          v.fromBufferAttribute(nrmA, j).applyMatrix3(nm).normalize();
+          nrm[o3] = v.x; nrm[o3 + 1] = v.y; nrm[o3 + 2] = v.z;
+        }
+        if (uv) {
+          const o2 = (i * vtx + j) * 2;
+          uv[o2] = uvA.getX(j); uv[o2 + 1] = uvA.getY(j);
+        }
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    if (nrm) g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    if (uv)  g.setAttribute('uv',     new THREE.BufferAttribute(uv, 2));
+    const mesh = new THREE.Mesh(g, im.material);
+    mesh.name = im.name;
+    mesh.position.copy(im.position);
+    mesh.quaternion.copy(im.quaternion);
+    mesh.scale.copy(im.scale);
+    im.parent.add(mesh);
+    im.parent.remove(im);
+  }
+}
+
 async function _buildExportRoot(terrain, buildings, name, features) {
   if (!terrain) throw new Error('生成された3Dシーンがありません — まず3D表示を生成してください');
   const mesh = _resolveTerrainMesh(terrain);
@@ -54,10 +104,9 @@ async function _buildExportRoot(terrain, buildings, name, features) {
   }
   root.add(t);
   if (buildings) root.add(buildings.clone());
-  // Ground features (roads / rails / water / bridges / trees). Trees are
-  // InstancedMesh — clone() preserves the instance buffers, and the
-  // exporters expand instances to real geometry on write.
+  // Ground features (roads / rails / water / bridges / trees).
   if (features) root.add(features.clone());
+  _expandInstancedMeshes(root);
   return root;
 }
 
@@ -136,8 +185,42 @@ async function exportSceneAsObj(terrain, buildings, baseName, features) {
     }
   });
 
+  // Stable, UNIQUE .mtl names. Material .name often repeats (every PLATEAU
+  // tile names its materials 'plateau') — duplicate newmtl entries make
+  // importers bind the wrong texture.
+  const usedNames = new Set();
+  const matNames = materials.map((m, i) => {
+    let n = (m.name && /^[\w.-]+$/.test(m.name)) ? m.name : `mat_${i}`;
+    if (usedNames.has(n)) n = `${n}_${i}`;
+    usedNames.add(n);
+    return n;
+  });
+
   let objText = new THREE.OBJExporter().parse(root);
-  // Inject mtllib + material name reference at the top; OBJExporter doesn't.
+  // OBJExporter only writes o/v/vt/vn/f records — without usemtl lines the
+  // .mtl we generate (and its textures) is never applied by any importer
+  // and the model comes in untextured grey. It emits one "o <name>" block
+  // per mesh in root.traverse order, the same order we collected materials
+  // in, so pair them up and inject `usemtl` after each "o" line. (Material
+  // ARRAYS can't be represented — OBJExporter ignores geometry groups — so
+  // emit the first entry; the dominant texture survives.)
+  const meshMatSeq = [];
+  root.traverse(obj => {
+    if (obj.isMesh) {
+      const m = Array.isArray(obj.material) ? obj.material[0] : obj.material;
+      meshMatSeq.push(m && matIds.has(m) ? matNames[matIds.get(m)] : null);
+    } else if (obj.isLine || obj.isPoints) {
+      meshMatSeq.push(null);   // exporter writes an "o" block for these too
+    }
+  });
+  let oIdx = 0;
+  objText = objText.split('\n').map(line => {
+    if (line.startsWith('o ') || line === 'o') {
+      const matName = meshMatSeq[oIdx++];
+      if (matName) return line + '\nusemtl ' + matName;
+    }
+    return line;
+  }).join('\n');
   objText = `mtllib ${baseName}.mtl\n` + objText;
 
   // Render each unique texture into a PNG via an offscreen canvas.
@@ -152,7 +235,10 @@ async function exportSceneAsObj(terrain, buildings, baseName, features) {
     c.height = tex.image.height || tex.image.videoHeight || 256;
     try { c.getContext('2d').drawImage(tex.image, 0, 0, c.width, c.height); }
     catch { return null; }
-    const file = `textures/${tex.name || 'tex_' + textures.length}.png`;
+    // Sanitise: spaces split MTL map_Kd tokens, non-ASCII breaks CP437
+    // zip readers — strict importers then silently lose the texture.
+    const safe = (tex.name || 'tex_' + textures.length).replace(/[^\w.-]+/g, '_');
+    const file = `textures/${safe}.png`;
     const base64 = c.toDataURL('image/png').split(',').pop();
     texIds.set(tex, textures.length);
     textures.push({ file, base64 });
@@ -163,7 +249,7 @@ async function exportSceneAsObj(terrain, buildings, baseName, features) {
   // actually use (MeshLambertMaterial). Good enough for ~every DCC tool.
   const mtlLines = ['# openEarth3D MTL', `# generated for ${baseName}.obj`, ''];
   materials.forEach((m, i) => {
-    const name = (m.name && /^[\w.-]+$/.test(m.name)) ? m.name : `mat_${i}`;
+    const name = matNames[i];
     const col  = m.color || new THREE.Color(0xffffff);
     mtlLines.push(`newmtl ${name}`);
     mtlLines.push(`Ka 0.2 0.2 0.2`);

@@ -41,12 +41,33 @@ function showProgress(v) {
 }
 
 // Show a transient error in the progress label instead of a blocking alert.
+// The label lives inside #progressWrap which is display:none outside a run,
+// so force the wrap visible — otherwise errors fired from idle-state buttons
+// (invalid lat/lon, geolocation denied, export/share failures) are silent.
 function showError(msg) {
+  showProgress(true);
   const label = document.getElementById('progressLabel');
   if (label) {
     label.textContent = '❌ ' + msg;
     label.style.color = '#ff8a8a';
-    setTimeout(() => { label.style.color = ''; }, 6000);
+    setTimeout(() => {
+      label.style.color = '';
+      // Only auto-hide if no run is in flight (run() manages it otherwise).
+      if (document.getElementById('runBtn').disabled === false) showProgress(false);
+    }, 6000);
+  }
+}
+
+// Non-error sibling of showError for success/status toasts (share copied,
+// screenshot saved, …) — same surfacing, no ❌ and no red.
+function showStatus(msg) {
+  showProgress(true);
+  const label = document.getElementById('progressLabel');
+  if (label) {
+    label.textContent = msg;
+    setTimeout(() => {
+      if (document.getElementById('runBtn').disabled === false) showProgress(false);
+    }, 4000);
   }
 }
 
@@ -188,14 +209,20 @@ function setExportEnabled(enabled) {
 // reproduces the exact view. Hash (not query) keeps it client-side only.
 function buildShareUrl() {
   const g = id => (document.getElementById(id) || {}).value;
-  const p = new URLSearchParams({
+  const params = {
     lat: g('latInput'), lon: g('lonInput'), km: g('rangeKm'),
     mesh: g('meshDetail'), src: g('photoSource'), tex: g('textureQuality'),
     exag: g('vertExag'),
     bldg: document.getElementById('toggleBuildings').checked ? '1' : '0',
     plateau: document.getElementById('togglePlateau').checked ? '1' : '0',
-  });
-  return location.origin + location.pathname + '#' + p.toString();
+  };
+  // Custom aerial source list must travel in the share link, otherwise
+  // sharing a view with src=custom hands the recipient a 'custom' mode
+  // with no usable source and aerial fetch fails to reproduce the view.
+  // Only include when non-empty to keep the URL short.
+  const customs = (g('customAerialJson') || '').trim();
+  if (customs) params.customs = customs;
+  return location.origin + location.pathname + '#' + new URLSearchParams(params).toString();
 }
 
 // Apply settings from the URL hash on load. Returns true if anything was
@@ -209,8 +236,17 @@ function applyHashState() {
   set('textureQuality', 'tex'); set('vertExag', 'exag');
   if (p.get('bldg') != null) document.getElementById('toggleBuildings').checked = p.get('bldg') === '1';
   if (p.get('plateau') != null) document.getElementById('togglePlateau').checked = p.get('plateau') === '1';
-  if (p.get('km')) document.getElementById('kmLabel').textContent = parseFloat(p.get('km')).toFixed(1) + ' km';
-  if (p.get('exag')) document.getElementById('exagLabel').textContent = parseFloat(p.get('exag')).toFixed(1) + 'x';
+  if (p.get('customs') != null) {
+    document.getElementById('customAerialJson').value = p.get('customs');
+    validateCustomAerialJson();
+  }
+  // Labels must reflect what the range input ACTUALLY accepted — a
+  // malformed hash (#km=abc) is rejected by the input element but
+  // parseFloat(p.get(...)) would still render "NaN km".
+  document.getElementById('kmLabel').textContent =
+    parseFloat(document.getElementById('rangeKm').value).toFixed(1) + ' km';
+  document.getElementById('exagLabel').textContent =
+    parseFloat(document.getElementById('vertExag').value).toFixed(1) + 'x';
   return p.has('lat') && p.has('lon');
 }
 
@@ -308,14 +344,23 @@ async function run() {
   // slopes twice as steeply as the buildings' base plane and they no longer
   // sit flush. When we're inside a PLATEAU city with the toggle on, force
   // true scale (1×) so terrain + LOD2 buildings share one vertical metric.
-  const willTryPlateau = usePlateau && findPlateauCities(lat, lon).length > 0;
+  // Buildings off ⇒ nothing to keep flush ⇒ honour the user's slider.
+  const willTryPlateau = usePlateau && showBuildings
+    && findPlateauCities(lat, lon).length > 0;
   const vertExag = willTryPlateau ? 1.0 : vertExagInput;
 
   if (isNaN(lat) || isNaN(lon)) { showError('緯度経度を入力してください'); return; }
 
   persistInputs();
   document.getElementById('runBtn').disabled = true;
+  setExportEnabled(false);   // stale-scene export during the rebuild = partial ZIP
   showProgress(true);
+
+  // Everything below runs inside try/finally: any uncaught throw (WebGL
+  // context loss during texture upload, a geometry bug…) used to leave
+  // runBtn disabled forever with the progress bar frozen — page reload
+  // was the only way out.
+  try {
 
   const bb = bboxFromCenter(lat, lon, km);
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
@@ -329,7 +374,6 @@ async function run() {
     });
   } catch (e) {
     showError('地形取得失敗: ' + e.message);
-    document.getElementById('runBtn').disabled = false;
     return;
   }
   // elevGrid.length === meshN (kept here only as a sanity guard if the
@@ -346,7 +390,6 @@ async function run() {
     }, { mode: photoSrc, customs: customAerials, maxTextureEdge });
   } catch (e) {
     showError('航空写真取得失敗: ' + e.message);
-    document.getElementById('runBtn').disabled = false;
     return;
   }
 
@@ -413,32 +456,92 @@ async function run() {
           const plateauGroup = await loadPlateauBuildings(plateauPick.url, bb,
             (p, label) => setProgress(0.80 + p * 0.15, label));
           if (plateauGroup) {
-            // Vertical alignment, robust to the residual ~15° tilt still in
-            // the PLATEAU transform. Aligning the global bbox bottom (one
-            // tilted corner) over-shoots. Instead cast a ray straight DOWN
-            // through the scene CENTRE onto the PLATEAU geometry and anchor
-            // the lowest hit there (≈ ground at centre) to the terrain at
-            // centre. Local sampling makes it tilt-tolerant — the middle of
-            // the view sits right even while the corners still slope until
-            // the transform is fully fixed.
             plateauGroup.updateMatrixWorld(true);
-            const cx = xSize / 2, cz = zSize / 2;
-            const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
-            const downRay = new THREE.Raycaster(
-              new THREE.Vector3(cx, 1e5, cz), new THREE.Vector3(0, -1, 0));
-            const hits = downRay.intersectObject(plateauGroup, true);
+
+            // ── Cull buildings outside the requested area ─────────────────
+            // A single PLATEAU b3dm tile covers a whole district (~2 km),
+            // far larger than a 1 km request. We keep a tile if its region
+            // merely TOUCHES the bbox, so one corner-touching tile drags in
+            // buildings that sprawl 1–1.5 km past the map edge, floating
+            // over no terrain / aerial. Cull per-building: in world space the
+            // group's coords ARE the local map metres (terrain sits at scene
+            // origin, 0→xSize × 0→zSize), so drop any mesh whose centre falls
+            // outside the map plus a small margin for border straddlers.
+            const MARGIN = 120;   // metres of slack beyond the map edge
+            let meshCount = 0;
+            const toCull = [];
+            plateauGroup.traverse(o => {
+              if (!o.isMesh) return;
+              meshCount++;
+              const b = new THREE.Box3().setFromObject(o);
+              if (!isFinite(b.min.x)) return;
+              const cxw = (b.min.x + b.max.x) / 2, czw = (b.min.z + b.max.z) / 2;
+              if (cxw < -MARGIN || cxw > xSize + MARGIN ||
+                  czw < -MARGIN || czw > zSize + MARGIN) toCull.push(o);
+            });
+            // Safety: if the filter would wipe out (almost) everything, our
+            // local-coordinate assumption is wrong for this dataset — better
+            // to show the buildings sprawling than a blank scene. Skip cull.
+            if (meshCount > 0 && toCull.length < meshCount * 0.95) {
+              for (const o of toCull) {
+                if (o.parent) o.parent.remove(o);
+                if (o.geometry) o.geometry.dispose();
+              }
+              if (toCull.length) {
+                console.log(`[PLATEAU] culled ${toCull.length}/${meshCount} building(s) outside the ${km} km area`);
+                plateauGroup.updateMatrixWorld(true);
+              }
+            } else if (toCull.length) {
+              console.warn(`[PLATEAU] cull skipped — would remove ${toCull.length}/${meshCount} ` +
+                `(coordinate assumption likely off)`);
+            }
+
+            // ── Vertical alignment ───────────────────────────────────────
+            // PLATEAU's ENU frame places every building at its true
+            // ELLIPSOIDAL height, but our terrain DEM is in ORTHOMETRIC
+            // metres — the two differ by the (locally near-constant) geoid
+            // undulation (~+36 m around Tokyo). So a single global Y shift
+            // lines them up.
+            //
+            // The previous single-centre-ray approach was fragile: PLATEAU
+            // LOD2 has NO ground plane, so a ray down the scene centre often
+            // hits only a tower ROOF (174 m up in Shinjuku) and then buries
+            // the whole city. Instead, take each building's own base (its
+            // mesh min-Y ≈ the elevation it sits on) and use the MEDIAN of
+            // those bases as "typical ground". Median rejects the handful of
+            // sunken/underground meshes and basement geometry. Align that to
+            // the median terrain elevation across the scene.
+            const bases = [];
+            plateauGroup.traverse(o => {
+              if (!o.isMesh) return;
+              const b = new THREE.Box3().setFromObject(o);
+              if (isFinite(b.min.y)) bases.push(b.min.y);
+            });
+            const median = arr => {
+              if (!arr.length) return null;
+              const s = arr.slice().sort((a, b) => a - b);
+              const m = s.length >> 1;
+              return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+            };
+            // Median terrain elevation sampled on a coarse grid.
+            const tSamples = [];
+            for (let i = 1; i < 8; i++)
+              for (let j = 1; j < 8; j++)
+                tSamples.push(getElevAt(elevGrid, meshN, i / 8, j / 8) * vertExag);
+            const buildingBase = median(bases);
+            const terrainMed = median(tSamples);
             let shift = null;
-            if (hits.length) {
-              // Farthest hit along -Y = lowest surface ≈ ground at centre.
-              shift = terrainCenterY - hits[hits.length - 1].point.y;
+            if (buildingBase != null && terrainMed != null) {
+              shift = terrainMed - buildingBase;
             } else {
-              // No building directly at centre — fall back to bbox bottom.
               const box = new THREE.Box3().setFromObject(plateauGroup);
+              const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
               if (isFinite(box.min.y)) shift = terrainCenterY - box.min.y;
             }
             if (shift != null && Math.abs(shift) < 2000) {
               plateauGroup.position.y += shift;
-              console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m (centre-ray)`);
+              console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m ` +
+                `(median of ${bases.length} building bases)`);
             }
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;
@@ -471,10 +574,19 @@ async function run() {
     }
   }
 
-  setProgress(1.0, '完了');
-  setTimeout(() => showProgress(false), 1000);
-  document.getElementById('runBtn').disabled = false;
+  // Fill the bar but KEEP the last label — it's the only place that tells
+  // the user whether they got PLATEAU or OSM (and any ⚠️ partial-failure
+  // note). Overwriting it with 完了 in the same tick made it unreadable.
+  document.getElementById('progressBar').style.width = '100%';
+  setTimeout(() => showProgress(false), 4000);
   setExportEnabled(true);
+
+  } catch (e) {
+    console.error('run() failed:', e);
+    showError('生成失敗: ' + (e.message || e));
+  } finally {
+    document.getElementById('runBtn').disabled = false;
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -508,9 +620,9 @@ document.addEventListener('DOMContentLoaded', () => {
     history.replaceState(null, '', url);  // reflect in the address bar too
     try {
       await navigator.clipboard.writeText(url);
-      showError('🔗 共有URLをクリップボードにコピーしました');
+      showStatus('🔗 共有URLをクリップボードにコピーしました');
     } catch {
-      showError('URL をアドレスバーに反映しました（コピー権限なし）');
+      showStatus('URL をアドレスバーに反映しました（コピー権限なし）');
     }
   });
 

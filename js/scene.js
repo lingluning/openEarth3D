@@ -81,6 +81,12 @@ const ColorGradeShader = {
       float lum = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
       c.rgb = mix(vec3(lum), c.rgb, saturation);
       gl_FragColor = vec4(clamp(c.rgb, 0.0, 1.0), c.a);
+      // renderer.outputEncoding only applies to the default framebuffer;
+      // inside the composer the RenderPass wrote LINEAR values into the
+      // render target, so the final pass must do the sRGB conversion or
+      // the whole scene (notably the aerial photo) renders darker than
+      // the no-composer fallback path.
+      gl_FragColor = LinearTosRGB(gl_FragColor);
     }
   `,
 };

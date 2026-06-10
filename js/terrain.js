@@ -86,16 +86,19 @@ async function mapWithConcurrency(items, limit, worker) {
   return results;
 }
 
-// Bilinear sample from a decoded tile array
-function sampleTile(arr, fx, fy) {
+// Samplers operate on a single stitched mosaic of all fetched tiles, not
+// per-tile arrays: per-tile clamping could never reach the neighbouring
+// tile's pixels, leaving a one-pixel flat shelf (bicubic: two-pixel) crease
+// along every DEM tile seam.
+function sampleMosaic(arr, W, H, fx, fy) {
   if (!arr) return 0;
-  const x0 = Math.max(0, Math.min(255, Math.floor(fx)));
-  const y0 = Math.max(0, Math.min(255, Math.floor(fy)));
-  const x1 = Math.min(255, x0 + 1);
-  const y1 = Math.min(255, y0 + 1);
-  const tx = fx - x0, ty = fy - y0;
-  return (arr[y0 * 256 + x0] * (1 - tx) + arr[y0 * 256 + x1] * tx) * (1 - ty)
-       + (arr[y1 * 256 + x0] * (1 - tx) + arr[y1 * 256 + x1] * tx) * ty;
+  const x0 = Math.max(0, Math.min(W - 1, Math.floor(fx)));
+  const y0 = Math.max(0, Math.min(H - 1, Math.floor(fy)));
+  const x1 = Math.min(W - 1, x0 + 1);
+  const y1 = Math.min(H - 1, y0 + 1);
+  const tx = Math.max(0, Math.min(1, fx - x0)), ty = Math.max(0, Math.min(1, fy - y0));
+  return (arr[y0 * W + x0] * (1 - tx) + arr[y0 * W + x1] * tx) * (1 - ty)
+       + (arr[y1 * W + x0] * (1 - tx) + arr[y1 * W + x1] * tx) * ty;
 }
 
 // Catmull-Rom 1D cubic. Smoother than bilinear when the output grid is
@@ -108,16 +111,16 @@ function _cubic(p0, p1, p2, p3, t) {
   return ((a * t + b) * t + c) * t + p1;
 }
 
-function _readClamped(arr, x, y) {
-  const cx = Math.max(0, Math.min(255, x));
-  const cy = Math.max(0, Math.min(255, y));
-  return arr[cy * 256 + cx];
+function _readClamped(arr, W, H, x, y) {
+  const cx = Math.max(0, Math.min(W - 1, x));
+  const cy = Math.max(0, Math.min(H - 1, y));
+  return arr[cy * W + cx];
 }
 
-// Bicubic sample of a 256×256 tile. Only worth doing when the output mesh
-// is denser than DEM pixels (otherwise we're oversampling and bilinear
+// Bicubic sample of the mosaic. Only worth doing when the output mesh is
+// denser than DEM pixels (otherwise we're oversampling and bilinear
 // suffices).
-function sampleTileCubic(arr, fx, fy) {
+function sampleMosaicCubic(arr, W, H, fx, fy) {
   if (!arr) return 0;
   const x = Math.floor(fx), y = Math.floor(fy);
   const tx = fx - x, ty = fy - y;
@@ -125,10 +128,10 @@ function sampleTileCubic(arr, fx, fy) {
   for (let j = 0; j < 4; j++) {
     const yy = y - 1 + j;
     rows[j] = _cubic(
-      _readClamped(arr, x - 1, yy),
-      _readClamped(arr, x,     yy),
-      _readClamped(arr, x + 1, yy),
-      _readClamped(arr, x + 2, yy),
+      _readClamped(arr, W, H, x - 1, yy),
+      _readClamped(arr, W, H, x,     yy),
+      _readClamped(arr, W, H, x + 1, yy),
+      _readClamped(arr, W, H, x + 2, yy),
       tx
     );
   }
@@ -154,11 +157,23 @@ function pickDemZoom(bb, meshN, zMax = 15, zMin = 9) {
   // Bbox width in metres at the centre latitude.
   const widthM = (bb.e - bb.w) * (Math.PI / 180) * 6378137 * cosLat;
   const cellM = widthM / (meshN - 1);
-  for (let z = zMax; z >= zMin; z--) {
-    const pxM = 156543.03 * cosLat / Math.pow(2, z);
-    if (pxM <= cellM) return z;     // first zoom whose pixels fit in a cell
+  // Ascend from the coarsest zoom and return the FIRST one whose pixels
+  // are at least as fine as a mesh cell. (Descending from zMax returned
+  // zMax for almost every input — and worse, fell through to zMin
+  // (~300 m/px!) whenever the mesh was denser than zMax pixels, so
+  // *raising* mesh detail produced dramatically flatter terrain.)
+  let z = zMax;
+  for (let zz = zMin; zz <= zMax; zz++) {
+    const pxM = 156543.03 * cosLat / Math.pow(2, zz);
+    if (pxM <= cellM) { z = zz; break; }
   }
-  return zMin;
+  // GSI's DEM tiles only exist at z15 (dem5a) / z14 (dem): below z14 in
+  // Japan both 404 and the cascade silently degrades to ~30 m Terrarium,
+  // which is worse than GSI 10 m data. Clamp.
+  const midLon = (bb.w + bb.e) / 2;
+  const inJapan = midLat >= 24 && midLat <= 46 && midLon >= 122 && midLon <= 154;
+  if (inJapan) z = Math.max(z, 14);
+  return z;
 }
 
 // High-resolution terrain grid.
@@ -190,6 +205,23 @@ async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
     onProgress && onProgress(done / total * 0.85, `地形タイル z${z} ${done}/${total} 取得中…`);
   });
 
+  // Stitch all fetched tiles into one mosaic so interpolation kernels can
+  // cross tile boundaries (per-tile clamping creased the terrain along
+  // every seam). Missing tiles (sea / no coverage) stay 0.
+  const mosaicW = (txMax - txMin + 1) * 256;
+  const mosaicH = (tyMax - tyMin + 1) * 256;
+  const mosaic = new Float32Array(mosaicW * mosaicH);
+  for (let ty = tyMin; ty <= tyMax; ty++) {
+    for (let tx = txMin; tx <= txMax; tx++) {
+      const arr = tileMap[`${tx}_${ty}`];
+      if (!arr) continue;
+      const ox = (tx - txMin) * 256, oy = (ty - tyMin) * 256;
+      for (let r = 0; r < 256; r++) {
+        mosaic.set(arr.subarray(r * 256, r * 256 + 256), (oy + r) * mosaicW + ox);
+      }
+    }
+  }
+
   // Decide once whether the mesh is denser than the DEM source. If so the
   // bilinear lattice would flatten curvature into facets — switch to a
   // Catmull-Rom bicubic kernel that preserves smoothness.
@@ -198,7 +230,7 @@ async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
   const cellM = widthM / (meshN - 1);
   const pxM = 156543.03 * cosLat / Math.pow(2, z);
   const useCubic = cellM < pxM * 0.9;
-  const sample = useCubic ? sampleTileCubic : sampleTile;
+  const sample = useCubic ? sampleMosaicCubic : sampleMosaic;
 
   const grid = [];
   for (let r = 0; r < meshN; r++) {
@@ -207,8 +239,12 @@ async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
     for (let c = 0; c < meshN; c++) {
       const lon = bb.w + c * (bb.e - bb.w) / (meshN - 1);
       const frac = deg2tileFrac(lat, lon, z);
-      const tx = Math.floor(frac.x), ty = Math.floor(frac.y);
-      row.push(sample(tileMap[`${tx}_${ty}`], (frac.x - tx) * 256, (frac.y - ty) * 256));
+      // −0.5: tile pixel values sit at pixel CENTRES; sampling at the
+      // raw fractional position shifted all elevations ~half a DEM pixel
+      // north-west relative to the aerial photo and OSM features.
+      const fx = (frac.x - txMin) * 256 - 0.5;
+      const fy = (frac.y - tyMin) * 256 - 0.5;
+      row.push(sample(mosaic, mosaicW, mosaicH, fx, fy));
     }
     grid.push(row);
     onProgress && onProgress(0.85 + r / meshN * 0.15, '地形メッシュ生成中…');
@@ -547,6 +583,11 @@ async function fetchAerialPhoto(bb, requestedZoom, onProgress, opts) {
   const cvs = document.createElement('canvas');
   cvs.width = cols * 256; cvs.height = rows * 256;
   const ctx = cvs.getContext('2d');
+  // Pre-fill: failed tiles (coverage edges — the picker only probes the
+  // CENTRE tile) leave transparent canvas, which an opaque material
+  // renders as solid black. Neutral grey-green reads as "no data".
+  ctx.fillStyle = '#9aa39a';
+  ctx.fillRect(0, 0, cvs.width, cvs.height);
 
   // Parallel download + decode, then composite onto the working canvas.
   const coords = [];
@@ -599,7 +640,9 @@ async function fetchAerialPhoto(bb, requestedZoom, onProgress, opts) {
   tex.minFilter = THREE.LinearMipMapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = true;
-  tex.name = `aerial_${src.name}_z${effectiveZoom}`;
+  // Sanitise: this name becomes a zip entry + MTL map_Kd path on export.
+  // Spaces split MTL tokens and non-ASCII breaks CP437 zip readers.
+  tex.name = `aerial_${src.id || src.name}_z${effectiveZoom}`.replace(/[^\w.-]+/g, '_');
   tex.userData = { sourceName: src.name, zoom: effectiveZoom, width: out.width, height: out.height };
   return tex;
 }

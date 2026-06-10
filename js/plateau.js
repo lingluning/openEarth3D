@@ -373,12 +373,17 @@ function _plateauFlatten(json) {
 
 async function fetchPlateauTilesetUrl(cityCode) {
   if (_PLATEAU_LOOKUP_CACHE[cityCode] !== undefined) return _PLATEAU_LOOKUP_CACHE[cityCode];
-  let cached = null;
-  try { cached = JSON.parse(sessionStorage.getItem('plateau:v3:' + cityCode) || 'null'); } catch {}
-  if (cached !== null) {
-    _PLATEAU_LOOKUP_CACHE[cityCode] = cached;
-    return cached;
-  }
+  // Distinguish "no cache entry" (getItem → null) from a cached negative
+  // result (the string 'null'): both used to parse to null, so negative
+  // results were re-queried on every run.
+  try {
+    const raw = sessionStorage.getItem('plateau:v3:' + cityCode);
+    if (raw !== null) {
+      const cached = JSON.parse(raw);
+      _PLATEAU_LOOKUP_CACHE[cityCode] = cached;
+      return cached;
+    }
+  } catch {}
 
   let result = null;
   try {
@@ -473,51 +478,6 @@ function geodeticToEcef(latDeg, lonDeg, h = 0) {
 
 // Build a 4×4 transform that takes ECEF coordinates to our local frame:
 // +X east, +Y up, +Z south, NW corner of `bb` at (0, 0, 0).
-// ENU-at-ECEF-point → ECEF rotation+translation matrix. This is the
-// per-tile transform Cesium calls `eastNorthUpToFixedFrame`. PLATEAU's
-// b3dm tiles store vertices in a glTF Y-up local frame where
-// +X = east, +Y = up, +Z = south at the tile's RTC_CENTER. So the
-// matrix that turns a glTF vertex into an ECEF position has columns
-// [east, up, -north] (rotation) and RTC_CENTER (translation).
-//
-// A naive `rotX(+90°)` only swaps glTF Y↔Z and leaves the result
-// expressed in the ECEF X/Y/Z basis — but ECEF axes are NOT east/up/
-// north anywhere except the equator at lon=0. At Tokyo (35.7°N) the
-// residual mismatch is ~54° of tilt, which produced the half-buried /
-// sloped buildings.
-function _enuToEcefMatrix(ecef) {
-  const x = ecef[0], y = ecef[1], z = ecef[2];
-  // WGS84
-  const a  = 6378137.0;
-  const e2 = 0.00669437999014;
-  const p  = Math.sqrt(x * x + y * y);
-  const lon = Math.atan2(y, x);
-  // Bowring's iterative geodetic latitude — converges in 3-4 iters.
-  let lat = Math.atan2(z, p * (1 - e2));
-  for (let i = 0; i < 5; i++) {
-    const sLat = Math.sin(lat);
-    const N = a / Math.sqrt(1 - e2 * sLat * sLat);
-    const h = p / Math.cos(lat) - N;
-    lat = Math.atan2(z, p * (1 - e2 * N / (N + h)));
-  }
-  const sLat = Math.sin(lat), cLat = Math.cos(lat);
-  const sLon = Math.sin(lon), cLon = Math.cos(lon);
-  // ENU basis vectors expressed in ECEF.
-  const ex = -sLon,        ey =  cLon,        ez = 0;
-  const nx = -sLat * cLon, ny = -sLat * sLon, nz = cLat;
-  const ux =  cLat * cLon, uy =  cLat * sLon, uz = sLat;
-  // glTF X→east, glTF Y→up, glTF Z→south(=-north). Columns are basis
-  // images; translation = RTC_CENTER.
-  const m = new THREE.Matrix4();
-  m.set(
-    ex, ux, -nx, x,
-    ey, uy, -ny, y,
-    ez, uz, -nz, z,
-    0,  0,   0,  1
-  );
-  return m;
-}
-
 function buildEcefToLocalMatrix(bb) {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
   const lat0 = (bb.n + bb.s) / 2;
@@ -613,9 +573,12 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
   onProgress && onProgress(0, 'PLATEAU カタログ読込中…');
 
   // Resolve a content reference (relative or absolute) against a base URL.
+  // Use the URL constructor so "../", "./" and root-relative "/x" refs all
+  // resolve correctly — naive base+ref concatenation builds broken URLs
+  // for those and the tiles silently fail to load.
   const resolveUrl = (ref, base) => {
-    if (/^https?:\/\//i.test(ref)) return ref;
-    return base + ref;
+    try { return new URL(ref, base).href; }
+    catch { return /^https?:\/\//i.test(ref) ? ref : base + ref; }
   };
 
   // Pull the content URI from a tile, handling both 3D Tiles 1.0
@@ -634,41 +597,49 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
   const leaves = [];
   const visited = new Set();   // guard against cyclic external refs
 
-  async function walk(tile, inherited, baseUrl) {
-    const region = tile.boundingVolume && tile.boundingVolume.region;
+  async function walk(tile, inherited, baseUrl, inheritedRegion, inheritedRefine) {
+    const region = (tile.boundingVolume && tile.boundingVolume.region) || inheritedRegion;
     if (!tileRegionIntersects(region, bb)) return;
 
+    // `refine` is inherited down the tree per the 3D Tiles spec.
+    const refine = String(tile.refine || inheritedRefine || 'REPLACE').toUpperCase();
     const xform = inherited.clone();
     if (tile.transform) xform.multiply(new THREE.Matrix4().fromArray(tile.transform));
 
-    // Recurse into in-tileset children first.
-    if (Array.isArray(tile.children) && tile.children.length > 0) {
-      for (const c of tile.children) await walk(c, xform, baseUrl);
-      // A tile can carry BOTH children and content; PLATEAU usually puts
-      // the geometry only on the deepest level, so if it has children we
-      // don't also load its own content (avoids double-draw).
-      return;
+    const uri = contentUri(tile);
+    const hasChildren = Array.isArray(tile.children) && tile.children.length > 0;
+    // A tile can carry BOTH children and content. With REPLACE refinement
+    // the parent's content is a coarser duplicate of its children — loading
+    // both double-draws. With ADD refinement the parent content is part of
+    // the model and must be loaded alongside the children, or buildings
+    // silently disappear.
+    const loadOwnContent = uri && (!hasChildren || refine === 'ADD');
+
+    if (loadOwnContent) {
+      const absUrl = resolveUrl(uri, baseUrl);
+      if (/\.json($|\?)/i.test(absUrl)) {
+        // External tileset reference → fetch and recurse.
+        if (!visited.has(absUrl)) {
+          visited.add(absUrl);
+          try {
+            const sub = await fetch(absUrl).then(r => r.json());
+            const subBase = absUrl.substring(0, absUrl.lastIndexOf('/') + 1);
+            if (sub && sub.root) await walk(sub.root, xform, subBase, region, refine);
+          } catch (e) {
+            console.warn('PLATEAU external tileset failed:', absUrl, e.message);
+          }
+        }
+      } else {
+        // Real content tile (b3dm / glb). Store its ABSOLUTE url so loadOne
+        // doesn't need to know which nested tileset it came from. Carry the
+        // tile's bounding region so loadOne has a fallback ECEF anchor when
+        // the b3dm has no RTC_CENTER and no CESIUM_RTC extension.
+        leaves.push({ url: absUrl, transform: xform, region, _idx: leaves.length });
+      }
     }
 
-    const uri = contentUri(tile);
-    if (!uri) return;
-    const absUrl = resolveUrl(uri, baseUrl);
-
-    if (/\.json$/i.test(uri)) {
-      // External tileset reference → fetch and recurse.
-      if (visited.has(absUrl)) return;
-      visited.add(absUrl);
-      try {
-        const sub = await fetch(absUrl).then(r => r.json());
-        const subBase = absUrl.substring(0, absUrl.lastIndexOf('/') + 1);
-        if (sub && sub.root) await walk(sub.root, xform, subBase);
-      } catch (e) {
-        console.warn('PLATEAU external tileset failed:', absUrl, e.message);
-      }
-    } else {
-      // Real content tile (b3dm / glb). Store its ABSOLUTE url so loadOne
-      // doesn't need to know which nested tileset it came from.
-      leaves.push({ url: absUrl, transform: xform, _idx: leaves.length });
+    if (hasChildren) {
+      for (const c of tile.children) await walk(c, xform, baseUrl, region, refine);
     }
   }
 
@@ -692,13 +663,19 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
 
   // GLTFLoader + DRACOLoader. PLATEAU's LOD2 glb tiles use Draco mesh
   // compression — without this every loader.parse() throws "No DRACOLoader
-  // instance provided" and we render nothing.
+  // instance provided" and we render nothing. The DRACOLoader is a
+  // module-level singleton: each instance spins up a decoder worker pool
+  // that is never disposed, so a fresh one per run leaked workers on
+  // every regenerate.
   const loader = new THREE.GLTFLoader();
   if (typeof THREE.DRACOLoader === 'function') {
-    const draco = new THREE.DRACOLoader();
-    draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/draco/');
-    draco.setDecoderConfig({ type: 'js' });   // wasm decoder needs CORS+headers we don't have; js works everywhere
-    loader.setDRACOLoader(draco);
+    if (!loadPlateauBuildings._draco) {
+      const draco = new THREE.DRACOLoader();
+      draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/draco/');
+      draco.setDecoderConfig({ type: 'js' });   // wasm decoder needs CORS+headers we don't have; js works everywhere
+      loadPlateauBuildings._draco = draco;
+    }
+    loader.setDRACOLoader(loadPlateauBuildings._draco);
   } else {
     console.warn('[PLATEAU] DRACOLoader script not loaded — LOD2 tiles will fail');
   }
@@ -725,27 +702,66 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
       // there if the b3dm feature table didn't have it.
       if (!rtcCenter) rtcCenter = readGlbCesiumRtcCenter(glb);
 
+      // FALLBACK ANCHOR. If we still have no RTC_CENTER and leaf.transform
+      // is identity, the b3dm gave us no spatial info at all — small
+      // RTC-relative vertices would land near the ECEF ORIGIN (Earth's
+      // centre) instead of at the city. Use the tile's region centroid
+      // (always present in PLATEAU tilesets) converted to ECEF as a
+      // substitute anchor. (Skipped below if the vertices turn out to be
+      // absolute ECEF — see the verticesAbsolute guard.)
+      let anchorSource = rtcCenter ? 'rtc' : null;
+      if (!rtcCenter && leaf.region) {
+        const lon = (leaf.region[0] + leaf.region[2]) / 2 * 180 / Math.PI;
+        const lat = (leaf.region[1] + leaf.region[3]) / 2 * 180 / Math.PI;
+        const h   = (leaf.region[4] + leaf.region[5]) / 2;
+        const c   = geodeticToEcef(lat, lon, h);
+        rtcCenter = [c.x, c.y, c.z];
+        anchorSource = 'region';
+      }
+      if (!rtcCenter) anchorSource = 'NONE';
+
       // GLTFLoader needs a resource path for any EXTERNAL textures/bins the
       // glb references relatively (PLATEAU textured tiles often do).
       const resPath = leaf.url.substring(0, leaf.url.lastIndexOf('/') + 1);
       const gltf = await new Promise((resolve, reject) => {
         loader.parse(glb, resPath, resolve, reject);
       });
-      // Per-tile transform: glTF vertex → ECEF → group local-metres.
-      // Vertices are stored in a glTF Y-up local frame with axes
-      // (X=east, Y=up, Z=south) at the tile's RTC_CENTER. The matrix
-      // that maps that frame back to ECEF is exactly Cesium's
-      // `eastNorthUpToFixedFrame(RTC_CENTER)`: rotation columns
-      // [east, up, -north] expressed in ECEF, plus RTC_CENTER as
-      // translation. leaf.transform is the accumulated 3D Tiles parent
-      // transform (usually identity for PLATEAU leaves).
+      // Per-tile transform: glTF vertex → ECEF. PLATEAU follows the
+      // 3D Tiles 1.0 spec: glb vertices are ECEF-relative-to-RTC_CENTER
+      // with the axes swapped to glTF Y-up (gltf = (x, z, -y) of the
+      // ECEF vector). So the runtime transform is
+      //     ecef = leaf.transform · translate(RTC_CENTER) · rotX(+90°) · v
+      // — rotX undoes the axis swap, the translation restores the
+      // anchor.
+      //
+      // DO NOT replace rotX with an ENU-at-RTC_CENTER basis matrix.
+      // That assumes vertices are stored in a LOCAL east/up/south frame,
+      // which PLATEAU does not do; numerically a 100 m vertical edge
+      // comes out (−61.9, 58.3, −52.5) instead of (0, 100, 0) — every
+      // building tilts ~54° at Tokyo's latitude. (Tried in 577ccd6,
+      // reverted here. The giveaway: Tokyo Station rendered upright
+      // under rotX, which is impossible if rotX itself were wrong.)
+      //
+      // Guard: a tile with vertices in ABSOLUTE ECEF (huge coordinates,
+      // no baked anchor) must not get the anchor translation added on
+      // top — that would displace it by another Earth radius.
+      const rawBox = new THREE.Box3().setFromObject(gltf.scene);
+      const rawMagnitude = isFinite(rawBox.min.x)
+        ? rawBox.getCenter(new THREE.Vector3()).length() : 0;
+      const verticesAbsolute = rawMagnitude > 1e5;
+      const UP_AXIS = new THREE.Matrix4().makeRotationX(Math.PI / 2);
       const tileXform = leaf.transform.clone();
-      if (rtcCenter) {
-        tileXform.multiply(_enuToEcefMatrix(rtcCenter));
+      if (rtcCenter && !verticesAbsolute) {
+        tileXform.multiply(
+          new THREE.Matrix4().makeTranslation(rtcCenter[0], rtcCenter[1], rtcCenter[2])
+        );
       }
-      if (leaf._idx === 0) {
-        console.log('[PLATEAU] tile#0 RTC_CENTER =', rtcCenter,
-          '| leaf.transform identity =', leaf.transform.equals(new THREE.Matrix4()));
+      tileXform.multiply(UP_AXIS);
+      if (leaf._idx < 3) {
+        console.log(`[PLATEAU] tile#${leaf._idx} anchor=${anchorSource} ` +
+          `absVerts=${verticesAbsolute} ` +
+          `RTC=${rtcCenter ? rtcCenter.map(n => n.toFixed(0)).join(',') : 'none'} ` +
+          `leaf.transform.identity=${leaf.transform.equals(new THREE.Matrix4())}`);
       }
       tileXform.decompose(gltf.scene.position, gltf.scene.quaternion, gltf.scene.scale);
       // Replace PBR with Phong so PLATEAU buildings sit in the same flat-

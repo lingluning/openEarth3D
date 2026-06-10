@@ -58,27 +58,57 @@ const VEGETATION_DENSITY = {
   scrub: 0.0006,
 };
 
+// Live rail kinds — must mirror the regex in fetchGroundFeatures. Ways
+// fetched via the highway clause can carry ANY railway value (e.g.
+// highway=residential + railway=abandoned for streets built over old
+// lines); those must render as roads, not as ballast + steel rails.
+const RAIL_KINDS = new Set(['rail', 'light_rail', 'subway', 'tram', 'monorail', 'narrow_gauge']);
+
 function parseGroundFeatures(elements, bb) {
   const nodeMap = {};
   elements.filter(e => e.type === 'node').forEach(n => { nodeMap[n.id] = n; });
+  const wayMap = {};
+  elements.filter(e => e.type === 'way').forEach(w => { wayMap[w.id] = w; });
 
   const roads = [], waters = [], forests = [], trees = [], bridges = [], rails = [];
 
+  const wayCoords = w => (w.nodes || [])
+    .map(id => nodeMap[id])
+    .filter(Boolean)
+    .map(n => ({ lat: n.lat, lon: n.lon }));
+
   for (const e of elements) {
+    if (e.type === 'relation' && e.tags &&
+        (e.tags.natural === 'water' || e.tags.water)) {
+      // Water multipolygon: large lakes and most major rivers are mapped
+      // as relations whose member ways come back as untagged skeletons —
+      // the way loop below never sees them. Render each outer ring as a
+      // water polygon. (Inner rings/holes are skipped — an island simply
+      // gets drawn over by its own land features.)
+      for (const m of (e.members || [])) {
+        if (m.type !== 'way' || (m.role && m.role !== 'outer')) continue;
+        const w = wayMap[m.ref];
+        if (!w) continue;
+        const coords = wayCoords(w);
+        if (coords.length >= 3) waters.push({ coords });
+      }
+      continue;
+    }
     if (e.type === 'way' && e.tags) {
       const t = e.tags;
-      const coords = e.nodes
-        .map(id => nodeMap[id])
-        .filter(Boolean)
-        .map(n => ({ lat: n.lat, lon: n.lon }));
+      const coords = wayCoords(e);
       if (coords.length < 2) continue;
 
-      if (t.railway) {
-        // Subways underground (layer<0 and tunnel) are skipped — they'd
-        // render as lines buried in the terrain.
-        if (t.tunnel === 'yes' || parseInt(t.layer, 10) < 0) continue;
+      // Underground ways (tunnel / negative layer) would render draped
+      // over the terrain surface — a road tunnel through a hill becomes
+      // a road climbing over it. Skip for rails AND highways.
+      const underground = t.tunnel === 'yes' || parseInt(t.layer, 10) < 0;
+
+      if (t.railway && RAIL_KINDS.has(t.railway)) {
+        if (underground) continue;
         rails.push({ coords, kind: t.railway });
       } else if (t.highway) {
+        if (underground) continue;
         const style = ROAD_STYLES[t.highway] || ROAD_STYLES.unclassified;
         // OSM tags bridges with `bridge=*` on the underlying highway way.
         // `bridge=no` means "explicitly not a bridge" (rare), everything
