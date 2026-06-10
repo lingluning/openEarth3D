@@ -307,6 +307,18 @@ function findPlateauCity(lat, lon) {
   return hits[0] || null;
 }
 
+// All city entries whose bbox INTERSECTS the request bbox. A map area
+// frequently straddles ward boundaries — Tokyo Station sits right on the
+// Chiyoda/Chuo line — and loading only the click-point's ward leaves
+// every building across the boundary missing (half the map empty).
+function findPlateauCitiesForBbox(bb) {
+  const hits = [];
+  for (const c of PLATEAU_CITIES) {
+    if (!(c.bb.e < bb.w || c.bb.w > bb.e || c.bb.n < bb.s || c.bb.s > bb.n)) hits.push(c);
+  }
+  return hits;
+}
+
 // ── PLATEAU catalog API — resolve cityCode → best available tileset URL ─
 // Returns { url, lod } where lod ∈ {'lod2','lod1'}. Prefers LOD2 (real
 // roof shapes + measured heights); falls back to LOD1 (extruded boxes).
@@ -456,6 +468,24 @@ async function fetchPlateauBestForPoint(lat, lon) {
     if (!lod1Fallback) lod1Fallback = { city, ...r };
   }
   return lod1Fallback;
+}
+
+// Resolve EVERY city whose bbox intersects the request bbox to its best
+// tileset. Returns an array of { city, url, lod, label } or null. The
+// caller loads each tileset and merges — that's what fills in the
+// buildings across ward boundaries instead of stopping at them.
+async function fetchPlateauForBbox(bb) {
+  const cities = findPlateauCitiesForBbox(bb);
+  const picks = [];
+  for (const city of cities) {
+    const r = await fetchPlateauTilesetUrl(city.code);
+    if (r) picks.push({ city, ...r });
+  }
+  if (!picks.length) return null;
+  // If at least one ward has LOD2, drop LOD1-only neighbours? No — a
+  // neighbour ward's LOD1 boxes still beat an empty half-map. Keep all;
+  // each pick is already its own city's best available.
+  return picks;
 }
 
 // ── ECEF math ───────────────────────────────────────────────────────────

@@ -339,17 +339,20 @@ async function run() {
   const meshN       = parseInt(document.getElementById('meshDetail').value, 10) || 128;
   const usePlateau  = document.getElementById('togglePlateau').checked;
 
+  if (isNaN(lat) || isNaN(lon)) { showError('緯度経度を入力してください'); return; }
+
+  const bb = bboxFromCenter(lat, lon, km);
+
   // Vertical exaggeration conflicts with real-scale 3D city models: if the
   // terrain is stretched 2× but PLATEAU buildings are true-scale, the terrain
   // slopes twice as steeply as the buildings' base plane and they no longer
-  // sit flush. When we're inside a PLATEAU city with the toggle on, force
-  // true scale (1×) so terrain + LOD2 buildings share one vertical metric.
+  // sit flush. When the AREA (not just the click point — boundary-straddling
+  // maps load neighbouring wards too) touches a PLATEAU city with the toggle
+  // on, force true scale (1×) so terrain + LOD2 share one vertical metric.
   // Buildings off ⇒ nothing to keep flush ⇒ honour the user's slider.
   const willTryPlateau = usePlateau && showBuildings
-    && findPlateauCities(lat, lon).length > 0;
+    && findPlateauCitiesForBbox(bb).length > 0;
   const vertExag = willTryPlateau ? 1.0 : vertExagInput;
-
-  if (isNaN(lat) || isNaN(lon)) { showError('緯度経度を入力してください'); return; }
 
   persistInputs();
   document.getElementById('runBtn').disabled = true;
@@ -362,7 +365,6 @@ async function run() {
   // was the only way out.
   try {
 
-  const bb = bboxFromCenter(lat, lon, km);
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
 
   // ── Step 1: terrain elevation ──────────────────────────────────────────
@@ -413,16 +415,16 @@ async function run() {
   if (showBuildings) {
     setProgress(0.75, 'OSMデータ取得中（道路・水域・樹木）…');
 
-    // Kick PLATEAU lookup in parallel with OSM. fetchPlateauBestForPoint
-    // walks every PLATEAU city whose bbox contains the click point and
-    // picks the one with the highest available LOD (LOD2 ≫ LOD1) — so
-    // a Tokyo-station click that intersects both Chiyoda and Chuo bboxes
-    // ends up on whichever has actual LOD2 in the catalog.
+    // Kick PLATEAU lookup in parallel with OSM. fetchPlateauForBbox
+    // resolves EVERY city/ward whose bbox intersects the map area, not
+    // just the click point's ward — a Tokyo-station map straddles the
+    // Chiyoda/Chuo boundary and loading only Chiyoda left the whole
+    // east half (Yaesu/Nihonbashi) without buildings.
     const plateauPromise = usePlateau
-      ? fetchPlateauBestForPoint(lat, lon).catch(e => { console.warn('PLATEAU lookup failed:', e); return null; })
+      ? fetchPlateauForBbox(bb).catch(e => { console.warn('PLATEAU lookup failed:', e); return null; })
       : Promise.resolve(null);
 
-    const [bRes, gRes, plateauPick] = await Promise.all([
+    const [bRes, gRes, plateauPicks] = await Promise.all([
       Promise.allSettled([fetchBuildings(bb)]).then(r => r[0]),
       Promise.allSettled([fetchGroundFeatures(bb)]).then(r => r[0]),
       plateauPromise,
@@ -446,16 +448,31 @@ async function run() {
 
       // PLATEAU path
       let usedPlateau = false;
-      if (plateauPick) {
+      if (plateauPicks && plateauPicks.length) {
         try {
-          // plateauPick.label is e.g. "LOD2 (textured)" or "LOD2 (no-texture)"
+          // pick.label is e.g. "LOD2 (textured)" or "LOD2 (no-texture)"
           // so the user can tell from the progress whether they're getting
           // the photo-textured variant (roof detail) or the white model.
-          const lodLabel = plateauPick.label || plateauPick.lod.toUpperCase();
-          setProgress(0.80, `PLATEAU ${lodLabel} (${plateauPick.city.name}) 読込中…`);
-          const plateauGroup = await loadPlateauBuildings(plateauPick.url, bb,
-            (p, label) => setProgress(0.80 + p * 0.15, label));
-          if (plateauGroup) {
+          const cityNames = plateauPicks.map(p => p.city.name).join('・');
+          const lodLabel = plateauPicks[0].label || plateauPicks[0].lod.toUpperCase();
+          // Load every intersecting ward's tileset and merge under one
+          // parent. Sequential, so the per-tileset concurrency cap (6)
+          // stays the effective ceiling on parallel CDN requests.
+          const plateauGroup = new THREE.Group();
+          plateauGroup.name = 'plateau-merged';
+          for (let k = 0; k < plateauPicks.length; k++) {
+            const pick = plateauPicks[k];
+            setProgress(0.80 + (k / plateauPicks.length) * 0.15,
+              `PLATEAU ${pick.label || pick.lod} (${pick.city.name}) 読込中…`);
+            try {
+              const g = await loadPlateauBuildings(pick.url, bb, (p, label) =>
+                setProgress(0.80 + ((k + p) / plateauPicks.length) * 0.15, label));
+              if (g) plateauGroup.add(g);
+            } catch (e) {
+              console.warn(`PLATEAU ${pick.city.name} load failed:`, e);
+            }
+          }
+          if (plateauGroup.children.length) {
             plateauGroup.updateMatrixWorld(true);
 
             // ── Cull buildings outside the requested area ─────────────────
@@ -549,7 +566,7 @@ async function run() {
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;
             usedPlateau = true;
-            setProgress(0.96, `✨ PLATEAU ${lodLabel} ${plateauPick.city.name} で表示中`);
+            setProgress(0.96, `✨ PLATEAU ${lodLabel} ${cityNames} で表示中`);
           }
         } catch (e) {
           console.warn('PLATEAU load failed, falling back to OSM:', e);
@@ -567,7 +584,7 @@ async function run() {
         const failNote = (bRes.status === 'rejected' || gRes.status === 'rejected')
           ? ' ⚠️ 一部のOSMデータ取得失敗' : '';
         const plateauNote = !usePlateau ? ''
-                          : (findPlateauCities(lat, lon).length === 0 ? ' (PLATEAU圏外)' : ' (PLATEAUデータ無し)');
+                          : (findPlateauCitiesForBbox(bb).length === 0 ? ' (PLATEAU圏外)' : ' (PLATEAUデータ無し)');
         setProgress(0.96,
           `建物 ${parsed.length} 棟・道路 ${feats.roads.length}・橋 ${feats.bridges.length}・水域 ${feats.waters.length}・樹木 ${feats.trees.length} を生成${plateauNote}${failNote}`
         );
