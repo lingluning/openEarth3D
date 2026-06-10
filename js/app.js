@@ -497,43 +497,46 @@ async function run() {
             }
 
             // ── Vertical alignment ───────────────────────────────────────
-            // PLATEAU's ENU frame places every building at its true
-            // ELLIPSOIDAL height, but our terrain DEM is in ORTHOMETRIC
-            // metres — the two differ by the (locally near-constant) geoid
-            // undulation (~+36 m around Tokyo). So a single global Y shift
-            // lines them up.
+            // PLATEAU's baked heights and our DEM disagree by a near-
+            // constant vertical offset (geoid vs ellipsoid conventions in
+            // the tiling pipeline — the sign/size varies per dataset, so
+            // MEASURE it, never assume ~36 m). One global Y shift aligns.
             //
-            // The previous single-centre-ray approach was fragile: PLATEAU
-            // LOD2 has NO ground plane, so a ray down the scene centre often
-            // hits only a tower ROOF (174 m up in Shinjuku) and then buries
-            // the whole city. Instead, take each building's own base (its
-            // mesh min-Y ≈ the elevation it sits on) and use the MEDIAN of
-            // those bases as "typical ground". Median rejects the handful of
-            // sunken/underground meshes and basement geometry. Align that to
-            // the median terrain elevation across the scene.
-            const bases = [];
-            plateauGroup.traverse(o => {
-              if (!o.isMesh) return;
-              const b = new THREE.Box3().setFromObject(o);
-              if (isFinite(b.min.y)) bases.push(b.min.y);
-            });
+            // Method: rain ~200 vertical rays over the map; for each ray
+            // take the LOWEST hit on the PLATEAU group (≈ building base at
+            // that column) minus the terrain height at the SAME (x,z), and
+            // use the MEDIAN of those per-column deltas.
+            //   · same-location comparison — slopes don't bias it
+            //   · lowest-hit-per-ray — tower roofs don't matter
+            //   · median — basement/underground outliers don't matter.
+            // (Earlier attempts: a single centre ray hit one tower roof and
+            // buried the city 174 m; per-MESH bbox minima looked like
+            // building bases but each PLATEAU mesh merges dozens of
+            // buildings incl. underground parts, so the "bases" sat ~38 m
+            // too low and the whole city floated by that much.)
             const median = arr => {
               if (!arr.length) return null;
               const s = arr.slice().sort((a, b) => a - b);
               const m = s.length >> 1;
               return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
             };
-            // Median terrain elevation sampled on a coarse grid.
-            const tSamples = [];
-            for (let i = 1; i < 8; i++)
-              for (let j = 1; j < 8; j++)
-                tSamples.push(getElevAt(elevGrid, meshN, i / 8, j / 8) * vertExag);
-            const buildingBase = median(bases);
-            const terrainMed = median(tSamples);
-            let shift = null;
-            if (buildingBase != null && terrainMed != null) {
-              shift = terrainMed - buildingBase;
-            } else {
+            const RAY_N = 15;
+            const DOWN = new THREE.Vector3(0, -1, 0);
+            const ray = new THREE.Raycaster();
+            const deltas = [];
+            for (let i = 1; i < RAY_N; i++) {
+              for (let j = 1; j < RAY_N; j++) {
+                ray.set(new THREE.Vector3(xSize * i / RAY_N, 1e5, zSize * j / RAY_N), DOWN);
+                const hits = ray.intersectObject(plateauGroup, true);
+                if (!hits.length) continue;
+                const terrainY = getElevAt(elevGrid, meshN, i / RAY_N, j / RAY_N) * vertExag;
+                deltas.push(terrainY - hits[hits.length - 1].point.y);
+              }
+            }
+            let shift = median(deltas);
+            if (shift == null) {
+              // No building under any ray (sparse rural tile) — fall back
+              // to bbox-bottom vs centre terrain.
               const box = new THREE.Box3().setFromObject(plateauGroup);
               const terrainCenterY = getElevAt(elevGrid, meshN, 0.5, 0.5) * vertExag;
               if (isFinite(box.min.y)) shift = terrainCenterY - box.min.y;
@@ -541,7 +544,7 @@ async function run() {
             if (shift != null && Math.abs(shift) < 2000) {
               plateauGroup.position.y += shift;
               console.log(`[PLATEAU] vertical align shift = ${shift.toFixed(1)} m ` +
-                `(median of ${bases.length} building bases)`);
+                `(median of ${deltas.length} ray deltas)`);
             }
             scene.add(plateauGroup);
             currentBuildings = plateauGroup;
