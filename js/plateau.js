@@ -399,27 +399,38 @@ async function fetchPlateauTilesetUrl(cityCode) {
 
   let result = null;
   try {
-    // Try the current v3 schema first, fall back to the legacy one.
-    let r = await _plateauGraphql(_plateauQueryV3(cityCode));
-    if ((!r.ok || r.json?.errors) ) {
-      const why = r.ok ? JSON.stringify(r.json.errors).slice(0, 160) : 'HTTP ' + r.status;
-      console.warn(`[PLATEAU ${cityCode}] v3 query failed (${why}); trying legacy`);
-      r = await _plateauGraphql(_plateauQueryLegacy(cityCode));
+    // A ward code may have nothing registered under it: designated-city
+    // data (大阪市・横浜市・名古屋市…) is often catalogued under the CITY
+    // code (e.g. 27100) rather than the ward codes (27127…). Try the
+    // ward first, then plausible parent codes.
+    const candidates = [cityCode];
+    if (!/00$/.test(cityCode)) {
+      candidates.push(cityCode.slice(0, 3) + '00');   // 27127 → 27100 (大阪市)
+      candidates.push(cityCode.slice(0, 4) + '0');    // 40131 → 40130 (福岡市)
     }
-    if (!r.ok) {
-      console.warn(`[PLATEAU ${cityCode}] catalog HTTP ${r.status} — falling back to OSM`);
-      _PLATEAU_LOOKUP_CACHE[cityCode] = null;
-      try { sessionStorage.setItem('plateau:v3:' + cityCode, 'null'); } catch {}
-      return null;
-    }
-    if (r.json?.errors) console.warn(`[PLATEAU ${cityCode}] GraphQL errors:`, r.json.errors);
+    let bldg = [];
+    for (const code of [...new Set(candidates)]) {
+      // Try the current v3 schema first, fall back to the legacy one.
+      let r = await _plateauGraphql(_plateauQueryV3(code));
+      if ((!r.ok || r.json?.errors)) {
+        const why = r.ok ? JSON.stringify(r.json.errors).slice(0, 160) : 'HTTP ' + r.status;
+        console.warn(`[PLATEAU ${code}] v3 query failed (${why}); trying legacy`);
+        r = await _plateauGraphql(_plateauQueryLegacy(code));
+      }
+      if (!r.ok) {
+        console.warn(`[PLATEAU ${code}] catalog HTTP ${r.status}`);
+        continue;
+      }
+      if (r.json?.errors) console.warn(`[PLATEAU ${code}] GraphQL errors:`, r.json.errors);
 
-    const all = _plateauFlatten(r.json);
-    const bldg = all.filter(i => i.url && i.url.includes('bldg') && i.url.endsWith('tileset.json'));
-    if (bldg.length) {
-      console.log(`[PLATEAU ${cityCode}] catalog returned ${bldg.length} bldg dataset(s):`);
-      for (const i of bldg) console.log('  •', i.name || '(no name)',
-        i.lod != null ? `lod${i.lod}` : '', i.texture != null ? `tex=${i.texture}` : '', '→', i.url);
+      const all = _plateauFlatten(r.json);
+      bldg = all.filter(i => i.url && i.url.includes('bldg') && i.url.endsWith('tileset.json'));
+      if (bldg.length) {
+        console.log(`[PLATEAU ${code}] catalog returned ${bldg.length} bldg dataset(s):`);
+        for (const i of bldg) console.log('  •', i.name || '(no name)',
+          i.lod != null ? `lod${i.lod}` : '', i.texture != null ? `tex=${i.texture}` : '', '→', i.url);
+        break;
+      }
     }
 
     // Classify by the explicit lod / texture fields when v3 provides them,
@@ -428,16 +439,24 @@ async function fetchPlateauTilesetUrl(cityCode) {
     const lodOf = i => i.lod != null ? Number(i.lod)
                      : /lod2/i.test(i.url) ? 2 : /lod1/i.test(i.url) ? 1 : 0;
     const texOf = i => {
+      // v3 PlateauDatasetItem.texture is the enum TEXTURE / NONE — trust
+      // it before any URL guessing.
+      if (i.texture === 'TEXTURE') return 'hi';
+      if (i.texture === 'NONE') return 'no';
       if (typeof i.texture === 'boolean') return i.texture ? 'hi' : 'no';
-      if (/no[_\- ]?texture|テクスチャ無/i.test(tag(i))) return 'no';
+      if (/no[_\- ]?texture|テクスチャ(無|なし)/i.test(tag(i))) return 'no';
       if (/low[_\- ]?(resolution|res)[_\- ]?texture|低解像度/i.test(tag(i))) return 'low';
       if (/texture|テクスチャ/i.test(tag(i))) return 'hi';
       return 'unknown';
     };
-    // Score: prefer LOD2, then textured (hi > low > unknown > no).
+    // Score: LOD2+ (real roof shapes) is the baseline requirement, then
+    // TEXTURE outweighs a further LOD step — a textured LOD2 looks far
+    // better in this viewer than a white LOD3 — then higher LOD breaks
+    // ties. LOD1 only as a last resort.
     const texRank = { hi: 3, low: 2, unknown: 1, no: 0 };
+    const scoreOf = s => (s.lod >= 2 ? 8 : 0) + s.lod + texRank[s.tex] * 2;
     const scored = bldg.map(i => ({ i, lod: lodOf(i), tex: texOf(i) }))
-      .sort((a, b) => (b.lod - a.lod) || (texRank[b.tex] - texRank[a.tex]));
+      .sort((a, b) => scoreOf(b) - scoreOf(a));
     const best = scored[0];
     if (best) {
       const lodTag = 'lod' + best.lod;
@@ -477,9 +496,16 @@ async function fetchPlateauBestForPoint(lat, lon) {
 async function fetchPlateauForBbox(bb) {
   const cities = findPlateauCitiesForBbox(bb);
   const picks = [];
+  const seenUrls = new Set();
   for (const city of cities) {
     const r = await fetchPlateauTilesetUrl(city.code);
-    if (r) picks.push({ city, ...r });
+    if (!r) continue;
+    // Dedupe: several ward codes can resolve to the SAME city-level
+    // tileset (designated-city fallback) — loading it once per ward
+    // would draw every building N times.
+    if (seenUrls.has(r.url)) continue;
+    seenUrls.add(r.url);
+    picks.push({ city, ...r });
   }
   if (!picks.length) return null;
   // If at least one ward has LOD2, drop LOD1-only neighbours? No — a
@@ -814,9 +840,19 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
           // colour to a dim grey that gets MULTIPLIED with the texture,
           // making photo textures look murky / dark. White = texture
           // passes through unmodified.
-          const color = m.map
-            ? new THREE.Color(0xffffff)
-            : (m.color ? m.color.clone() : new THREE.Color(0xcccccc));
+          //
+          // No texture (no-texture LOD2 variants — most of Osaka, and many
+          // regional cities, ship LOD2 without photo textures): stark
+          // white reads as "missing data". Tint with a soft per-mesh tone
+          // from the cartoon palette instead, deterministic by mesh count
+          // so re-runs look identical.
+          let color;
+          if (m.map) {
+            color = new THREE.Color(0xffffff);
+          } else {
+            const PALETTE = [0xeae4d8, 0xe3dcd2, 0xefe8da, 0xe0d8cc, 0xe8e2d4, 0xdcd6c8];
+            color = new THREE.Color(PALETTE[leafTotal % PALETTE.length]);
+          }
           const phong = new THREE.MeshPhongMaterial({
             color,
             map:          m.map || null,
