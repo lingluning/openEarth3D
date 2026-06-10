@@ -636,7 +636,7 @@ function tileRegionIntersects(region, bb) {
 // mesh. Positions are baked in WORLD space and the new meshes attach to
 // the identity root, so downstream transforms (vertical-align shift,
 // cull) behave exactly as before.
-function _autoTexturePlateau(root, aerialTex, bb) {
+function _autoTexturePlateau(root, aerialTex, bb, facadePalette) {
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
   const targets = [];
   root.updateMatrixWorld(true);
@@ -649,7 +649,11 @@ function _autoTexturePlateau(root, aerialTex, bb) {
 
   const roofMat = new THREE.MeshLambertMaterial({ map: aerialTex, side: THREE.DoubleSide });
   roofMat.name = 'plateau_roof_aerial';
-  const WALL_TONES = [0xeae4d8, 0xe3dcd2, 0xefe8da, 0xe0d8cc];
+  // Wall tones: the Mapillary neighbourhood palette when available (see
+  // server/facade-server.js), else the default light cartoon set.
+  const WALL_TONES = (Array.isArray(facadePalette) && facadePalette.length)
+    ? facadePalette
+    : [0xeae4d8, 0xe3dcd2, 0xefe8da, 0xe0d8cc];
   const wallMats = WALL_TONES.map((tone, i) => {
     const mat = (typeof makeFacadeTexture === 'function')
       ? new THREE.MeshLambertMaterial({ map: makeFacadeTexture(tone, 'office', i) })
@@ -1007,7 +1011,7 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress, opts) {
   // worst case we keep the plain white model.
   if (opts && opts.aerialTex) {
     try {
-      _autoTexturePlateau(root, opts.aerialTex, bb);
+      _autoTexturePlateau(root, opts.aerialTex, bb, opts.facadePalette);
     } catch (e) {
       console.warn('[PLATEAU] auto-texture failed (keeping white model):', e);
     }

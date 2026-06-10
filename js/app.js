@@ -81,6 +81,7 @@ function persistInputs() {
       vertExag: document.getElementById('vertExag').value,
       photoSource: document.getElementById('photoSource').value,
       customAerialJson: document.getElementById('customAerialJson').value,
+      facadeServerUrl: (document.getElementById('facadeServerUrl') || {}).value || '',
       textureQuality: document.getElementById('textureQuality').value,
       meshDetail: document.getElementById('meshDetail').value,
       hour: document.getElementById('timeOfDay').value,
@@ -109,6 +110,9 @@ function restoreInputs() {
     if (v.customAerialJson != null) {
       document.getElementById('customAerialJson').value = v.customAerialJson;
       validateCustomAerialJson();
+    }
+    if (v.facadeServerUrl != null && document.getElementById('facadeServerUrl')) {
+      document.getElementById('facadeServerUrl').value = v.facadeServerUrl;
     }
     if (v.textureQuality) document.getElementById('textureQuality').value = v.textureQuality;
     if (v.meshDetail) document.getElementById('meshDetail').value = v.meshDetail;
@@ -424,10 +428,38 @@ async function run() {
       ? fetchPlateauForBbox(bb).catch(e => { console.warn('PLATEAU lookup failed:', e); return null; })
       : Promise.resolve(null);
 
-    const [bRes, gRes, plateauPicks] = await Promise.all([
+    // Optional neighbourhood wall-colour palette from the local
+    // facade-palette server (server/facade-server.js — Mapillary street
+    // imagery, colour statistics only). Fail-soft: any error just means
+    // the procedural facades keep their default style palette.
+    const facadeUrl = ((document.getElementById('facadeServerUrl') || {}).value || '').trim();
+    const facadePromise = facadeUrl
+      ? (async () => {
+          const ctrl = new AbortController();
+          const tid = setTimeout(() => ctrl.abort(), 6000);
+          try {
+            const res = await fetch(
+              `${facadeUrl.replace(/\/+$/, '')}/palette?lat=${lat}&lon=${lon}&radius=600`,
+              { signal: ctrl.signal });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const j = await res.json();
+            const pal = (Array.isArray(j.palette) ? j.palette : [])
+              .map(h => parseInt(String(h).replace('#', ''), 16))
+              .filter(Number.isFinite);
+            if (pal.length) {
+              console.log(`[FACADE] Mapillary palette: ${j.palette.join(' ')} (samples=${j.samples})`);
+              return pal;
+            }
+            return null;
+          } finally { clearTimeout(tid); }
+        })().catch(e => { console.warn('[FACADE] palette fetch failed:', e.message); return null; })
+      : Promise.resolve(null);
+
+    const [bRes, gRes, plateauPicks, facadePalette] = await Promise.all([
       Promise.allSettled([fetchBuildings(bb)]).then(r => r[0]),
       Promise.allSettled([fetchGroundFeatures(bb)]).then(r => r[0]),
       plateauPromise,
+      facadePromise,
     ]);
     const bElems = bRes.status === 'fulfilled' ? bRes.value : [];
     const gElems = gRes.status === 'fulfilled' ? gRes.value : [];
@@ -467,7 +499,7 @@ async function run() {
             try {
               const g = await loadPlateauBuildings(pick.url, bb, (p, label) =>
                 setProgress(0.80 + ((k + p) / plateauPicks.length) * 0.15, label),
-                { aerialTex });
+                { aerialTex, facadePalette });
               if (g) plateauGroup.add(g);
             } catch (e) {
               console.warn(`PLATEAU ${pick.city.name} load failed:`, e);
@@ -602,7 +634,7 @@ async function run() {
       if (!usedPlateau) {
         setProgress(0.88, '建物3D生成中（OSM）…');
         const parsed = parseBuildings(bElems, bb);
-        currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag, { aerialTex });
+        currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag, { aerialTex, facadePalette });
         currentBuildingData = parsed;   // for click-to-inspect
         currentBB = bb;
         scene.add(currentBuildings);

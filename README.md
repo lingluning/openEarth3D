@@ -53,6 +53,24 @@ python -m http.server 8000
 
 - 地形・航空写真: [国土地理院](https://www.gsi.go.jp/) (日本全国対応)
 - 建物データ: [© OpenStreetMap contributors](https://www.openstreetmap.org/copyright)
+- 3D都市モデル: [PLATEAU](https://www.mlit.go.jp/plateau/)（国土交通省）
+- 街並み配色（オプション）: [Mapillary](https://www.mapillary.com/)（CC-BY-SA、色統計のみ利用）
+
+## 街並み配色サーバ（オプション・実験的）
+
+`server/facade-server.js` は Mapillary の街並み写真から周辺の**壁色パレット**を
+抽出するローカルバックエンドです。ビューアはそのパレットで手続き生成ファサードを
+着色します — 画像そのものは保存・転載せず、集計済みの色統計のみを使うため、
+ライセンス上クリーンです（生成テクスチャは 100% 手続き生成）。
+
+```bash
+cd server
+npm install
+MAPILLARY_TOKEN="MLY|..." node facade-server.js   # トークンは mapillary.com/dashboard/developers で無料取得
+```
+
+起動後、サイドバーの「街並み配色（Mapillary・実験的）」に
+`http://localhost:8787` を入力して生成すると有効になります。
 
 ## ライセンス
 

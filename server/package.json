@@ -1,0 +1,15 @@
+{
+  "name": "openearth3d-facade-server",
+  "version": "1.0.0",
+  "description": "Extracts dominant facade colour palettes from Mapillary street-level imagery (CC-BY-SA). Only aggregate colour statistics are derived and served — no imagery is stored or redistributed.",
+  "main": "facade-server.js",
+  "scripts": {
+    "start": "node facade-server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "jimp": "^0.22.12"
+  }
+}

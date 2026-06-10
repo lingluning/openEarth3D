@@ -681,6 +681,7 @@ function resetBuildingCaches() {
   for (const k in _shopfrontCache) delete _shopfrontCache[k];
   _roofEquipMat = null;  // disposed by clearSceneObjects; rebuild next run
   _aerialRoof = null;
+  _facadePalette = null;
 }
 
 // ── Aerial-photo roof projection (Auto-Create-bldg-lod2-tool style) ────────
@@ -691,6 +692,12 @@ function resetBuildingCaches() {
 // roofs keep their procedural tile/shingle look (an ortho photo of a
 // pitched roof smeared across sloped faces looks wrong).
 let _aerialRoof = null;   // { mat, xSize, zSize } for the current run
+
+// Neighbourhood wall palette derived from Mapillary street imagery by the
+// optional facade-palette server (colour STATISTICS only — the textures
+// themselves stay 100% procedural). When set, building wall base colours
+// come from this pool instead of the per-type style defaults.
+let _facadePalette = null;   // array of int hex, or null
 
 function _aerialUVRoof(geo) {
   const pos = geo.attributes.position;
@@ -1036,7 +1043,20 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   const cz = pts2d.reduce((s, p) => s + p.z, 0) / pts2d.length;
   const baseElev = getElevAt(elevGrid, gridN, cx / xSize, cz / zSize) * vertExag;
 
-  const style = getBuildingStyle(building.tags);
+  let style = getBuildingStyle(building.tags);
+  // Wall colour priority: explicit OSM building:colour tag > Mapillary
+  // neighbourhood palette > per-type style default. The footprint hash
+  // keeps palette assignment stable across re-runs.
+  const taggedColour = building.tags
+    && (building.tags['building:colour'] || building.tags['building:color']);
+  if (taggedColour) {
+    const c = new THREE.Color(style.wall);
+    c.set(String(taggedColour).toLowerCase());   // hex or CSS name; invalid → unchanged
+    style = Object.assign({}, style, { wall: c.getHex() });
+  } else if (_facadePalette && _facadePalette.length) {
+    const pick = _facadePalette[_buildingBucket(building.coords) % _facadePalette.length];
+    style = Object.assign({}, style, { wall: pick });
+  }
   const minH  = building.minH;
   const totalH = building.height;
 
@@ -1139,6 +1159,8 @@ function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag, opts) {
     mat.name = 'roof_aerial';
     _aerialRoof = { mat, xSize: bboxXSize(bb), zSize: bboxZSize(bb) };
   }
+  _facadePalette = (opts && Array.isArray(opts.facadePalette) && opts.facadePalette.length)
+    ? opts.facadePalette : null;
   // Collect every geometry part across all buildings, keyed by material.
   const byMaterial = new Map();
   for (const b of buildings) {

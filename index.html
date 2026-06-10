@@ -174,6 +174,17 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
           </div>
           <div id="customAerialStatus" style="font-size:0.70rem;color:#90caf9;margin-top:3px;min-height:14px"></div>
         </details>
+        <details style="margin-top:6px">
+          <summary style="font-size:0.74rem;color:#4fc3f7;cursor:pointer;outline:none;user-select:none">街並み配色（Mapillary・実験的）</summary>
+          <label style="margin-top:4px">ファサードサーバURL</label>
+          <input type="text" id="facadeServerUrl" placeholder="http://localhost:8787"
+                 style="margin-top:2px"/>
+          <div style="font-size:0.70rem;color:#7a9ab8;margin-top:3px;line-height:1.5">
+            server/facade-server.js を MAPILLARY_TOKEN 付きで起動すると、
+            周辺の街並み写真から壁色パレットを抽出し、生成ファサードに反映します
+            （画像は転載せず、色統計のみ利用）。
+          </div>
+        </details>
       </div>
       <div style="margin-top:10px">
         <label>テクスチャ画質 <span style="color:#81d4fa;font-size:0.72rem">（航空写真の最大解像度）</span></label>
@@ -286,14 +297,14 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 <!-- JSZip for DAE+texture bundling -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-<script src="js/coords.js?v=review13"></script>
-<script src="js/cache.js?v=review13"></script>
-<script src="js/terrain.js?v=review13"></script>
-<script src="js/buildings.js?v=review13"></script>
-<script src="js/features.js?v=review13"></script>
-<script src="js/plateau.js?v=review13"></script>
-<script src="js/export.js?v=review13"></script>
-<script src="js/scene.js?v=review13"></script>
-<script src="js/app.js?v=review13"></script>
+<script src="js/coords.js?v=review14"></script>
+<script src="js/cache.js?v=review14"></script>
+<script src="js/terrain.js?v=review14"></script>
+<script src="js/buildings.js?v=review14"></script>
+<script src="js/features.js?v=review14"></script>
+<script src="js/plateau.js?v=review14"></script>
+<script src="js/export.js?v=review14"></script>
+<script src="js/scene.js?v=review14"></script>
+<script src="js/app.js?v=review14"></script>
 </body>
 </html>
