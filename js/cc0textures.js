@@ -72,6 +72,29 @@ const CC0_FACADE_CATALOG = {
     worldSize: 4,
     label: 'PolyHaven concrete_wall_004 (CC0)',
   },
+  // Aliases keyed by getBuildingStyle's facade-pattern `type` — this is
+  // what _getWallMat actually looks up. (The human-readable keys above
+  // remain for the override-JSON UX.)
+  brick: {
+    url: 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brick_wall_006/brick_wall_006_diff_1k.jpg',
+    worldSize: 2,
+    label: 'PolyHaven brick_wall_006 (CC0)',
+  },
+  concrete: {
+    url: 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/concrete_wall_004/concrete_wall_004_diff_1k.jpg',
+    worldSize: 4,
+    label: 'PolyHaven concrete_wall_004 (CC0)',
+  },
+  wood: {
+    url: 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/weathered_brown_planks/weathered_brown_planks_diff_1k.jpg',
+    worldSize: 3,
+    label: 'PolyHaven weathered_brown_planks (CC0)',
+  },
+  metal: {
+    url: 'https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/corrugated_iron_02/corrugated_iron_02_diff_1k.jpg',
+    worldSize: 2.5,
+    label: 'PolyHaven corrugated_iron_02 (CC0)',
+  },
 };
 
 const _cc0TexCache = new Map();   // key (entry.url) → Promise<THREE.Texture>

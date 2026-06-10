@@ -374,14 +374,55 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
   ctx.fillStyle = `rgb(${r},${g},${b})`;
   ctx.fillRect(0, 0, W, H);
 
+  // Base material pattern under the windows, per facade type. Driven by
+  // OSM building:material via getBuildingStyle.
+  if (type === 'brick') {
+    // Running-bond brick courses: ~8 px rows with alternate offsets,
+    // mortar joints darker, per-brick value jitter for a handmade read.
+    const courseH = 10, brickW = 26;
+    for (let y = 0; y < H; y += courseH) {
+      const offset = (y / courseH) % 2 ? brickW / 2 : 0;
+      for (let x = -brickW; x < W + brickW; x += brickW) {
+        const shade = (rng() - 0.5) * 22;
+        ctx.fillStyle = `rgb(${Math.max(0, Math.min(255, r + shade))},` +
+                        `${Math.max(0, Math.min(255, g + shade * 0.8))},` +
+                        `${Math.max(0, Math.min(255, b + shade * 0.7))})`;
+        ctx.fillRect(x + offset + 1, y + 1, brickW - 2, courseH - 2);
+      }
+    }
+    ctx.strokeStyle = 'rgba(0,0,0,0.10)';
+  } else if (type === 'wood') {
+    // Vertical plank siding: ~12 px boards with value jitter + grain.
+    const plankW = 13;
+    for (let x = 0; x < W; x += plankW) {
+      const shade = (rng() - 0.5) * 26;
+      ctx.fillStyle = `rgb(${Math.max(0, Math.min(255, r + shade))},` +
+                      `${Math.max(0, Math.min(255, g + shade * 0.85))},` +
+                      `${Math.max(0, Math.min(255, b + shade * 0.6))})`;
+      ctx.fillRect(x + 1, 0, plankW - 2, H);
+    }
+    ctx.strokeStyle = 'rgba(40,24,8,0.18)';
+    for (let x = 0; x < W; x += plankW) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+  } else if (type === 'metal') {
+    // Corrugated panel: fine alternating vertical light/dark ribs.
+    for (let x = 0; x < W; x += 6) {
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      ctx.fillRect(x, 0, 2, H);
+      ctx.fillStyle = 'rgba(0,0,0,0.10)';
+      ctx.fillRect(x + 3, 0, 2, H);
+    }
+  }
+
   ctx.strokeStyle = `rgba(0,0,0,0.12)`;
   ctx.lineWidth = 1;
   for (let y = 22; y < H; y += 22) {
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   }
 
-  const COLS = type === 'glass' ? 4 : 5;
-  const ROWS = type === 'glass' ? 8 : 10;
+  const COLS = type === 'glass' ? 4 : type === 'metal' ? 3 : 5;
+  const ROWS = type === 'glass' ? 8 : type === 'metal' ? 6 : 10;
   const padX = 16, padY = 22;
   const stepX = (W - padX * 2) / COLS;
   const stepY = (H - padY * 2) / ROWS;
@@ -551,12 +592,24 @@ function getBuildingStyle(tags) {
   // because the old photoreal roof colours went near-black under the
   // SketchUp ambient+hemi rig. pbr.* is kept for back-compat but
   // MeshLambertMaterial ignores it.
-  if (mat === 'glass' || ['commercial','retail','office','civic','public'].includes(t))
+  //
+  // `type` selects the procedural facade PATTERN (window grid + base
+  // material drawing in makeFacadeTexture): glass curtain wall, brick
+  // courses, wood siding, corrugated metal, or plain concrete. OSM's
+  // building:material tag drives it directly when present — that's the
+  // most truthful per-building signal we have — with building= type
+  // heuristics as fallback.
+  if (mat === 'glass' || (!mat && ['commercial','retail','office','civic','public'].includes(t)))
     return { wall: 0x9ac2d4, roof: 0x809ab0, type: 'glass',    pbr: { rough: 0.15, metal: 0.55 } };
-  if (mat === 'metal' || ['industrial','warehouse','factory'].includes(t))
-    return { wall: 0xb4b4ac, roof: 0x9a9a92, type: 'concrete', pbr: { rough: 0.45, metal: 0.55 } };
-  if (mat === 'wood'  || ['church','cathedral','temple','shrine'].includes(t))
-    return { wall: 0xe8d490, roof: 0xa8884a, type: 'concrete', pbr: { rough: 0.75, metal: 0.0  } };
+  if (mat === 'brick')
+    return { wall: 0xb87858, roof: 0x96604a, type: 'brick',    pbr: { rough: 0.9,  metal: 0.0  } };
+  if (mat === 'metal' || mat === 'steel' ||
+      (!mat && ['industrial','warehouse','factory','hangar'].includes(t)))
+    return { wall: 0xb8bcc0, roof: 0x9a9a92, type: 'metal',    pbr: { rough: 0.45, metal: 0.55 } };
+  if (mat === 'wood' || (!mat && ['church','cathedral','temple','shrine'].includes(t)))
+    return { wall: 0xc8a878, roof: 0xa8884a, type: 'wood',     pbr: { rough: 0.75, metal: 0.0  } };
+  if (mat === 'concrete' || mat === 'plaster' || mat === 'cement_block')
+    return { wall: 0xd0ccc4, roof: 0x9a9488, type: 'concrete', pbr: { rough: 0.85, metal: 0.0  } };
   if (['residential','house','apartments','dormitory'].includes(t))
     return { wall: 0xe4c890, roof: 0xc06840, type: 'concrete', pbr: { rough: 0.85, metal: 0.0  } };  // terracotta
   return { wall: 0xd4ccc0, roof: 0x9a8a78, type: 'concrete', pbr: { rough: 0.85, metal: 0.0 } };
@@ -1076,6 +1129,20 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
     const pick = _facadePalette[_buildingBucket(building.coords) % _facadePalette.length];
     style = Object.assign({}, style, { wall: pick });
   }
+  // Roof tags: explicit roof:colour wins; otherwise roof:material picks a
+  // plausible tone (zinc-grey metal, green roof, clay tile).
+  const tagsB = building.tags || {};
+  const roofColourTag = tagsB['roof:colour'] || tagsB['roof:color'];
+  const roofMatTag = String(tagsB['roof:material'] || '').toLowerCase();
+  if (roofColourTag) {
+    const rc = new THREE.Color(style.roof);
+    rc.set(String(roofColourTag).toLowerCase());   // invalid → unchanged
+    style = Object.assign({}, style, { roof: rc.getHex() });
+  } else if (roofMatTag) {
+    if (/metal|steel|zinc|copper/.test(roofMatTag))      style = Object.assign({}, style, { roof: 0x96a0a6 });
+    else if (/grass|green/.test(roofMatTag))             style = Object.assign({}, style, { roof: 0x7aa05c });
+    else if (/roof_tiles|tile/.test(roofMatTag))         style = Object.assign({}, style, { roof: 0xb86848 });
+  }
   const minH  = building.minH;
   const totalH = building.height;
 
@@ -1108,7 +1175,16 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
     out.push({ geometry: _makeWallsGeo(pts2d, baseY, groundTopY, groundH),
                material: _getShopfrontMat(style, bucket) });
   }
-  out.push({ geometry: _makeWallsGeo(pts2d, groundTopY, wallTop),
+  // Floor-height-aware vertical UV repeat: one facade-texture window ROW
+  // per real storey. building:levels is OSM ground truth when present
+  // (floor height = building height / levels, clamped to sane bounds);
+  // 3 m otherwise. The facade canvas carries rowsPerRepeat window rows,
+  // so one full texture repeat spans rowsPerRepeat × floorH metres —
+  // windows land at storey rhythm instead of an arbitrary fixed repeat.
+  const levelsTag = _posFloat(tagsB['building:levels'] ?? tagsB.levels, 0);
+  const floorH = levelsTag > 0 ? Math.max(2.4, Math.min(5, totalH / levelsTag)) : 3;
+  const rowsPerRepeat = style.type === 'glass' ? 8 : style.type === 'metal' ? 6 : 10;
+  out.push({ geometry: _makeWallsGeo(pts2d, groundTopY, wallTop, floorH * rowsPerRepeat),
              material: _getWallMat(style, bucket) });
 
   const pitched = roofShape !== 'flat' && roofH > 0.5;
