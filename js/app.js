@@ -466,7 +466,8 @@ async function run() {
               `PLATEAU ${pick.label || pick.lod} (${pick.city.name}) 読込中…`);
             try {
               const g = await loadPlateauBuildings(pick.url, bb, (p, label) =>
-                setProgress(0.80 + ((k + p) / plateauPicks.length) * 0.15, label));
+                setProgress(0.80 + ((k + p) / plateauPicks.length) * 0.15, label),
+                { aerialTex });
               if (g) plateauGroup.add(g);
             } catch (e) {
               console.warn(`PLATEAU ${pick.city.name} load failed:`, e);
@@ -601,7 +602,7 @@ async function run() {
       if (!usedPlateau) {
         setProgress(0.88, '建物3D生成中（OSM）…');
         const parsed = parseBuildings(bElems, bb);
-        currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag);
+        currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag, { aerialTex });
         currentBuildingData = parsed;   // for click-to-inspect
         currentBB = bb;
         scene.add(currentBuildings);

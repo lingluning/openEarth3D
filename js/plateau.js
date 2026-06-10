@@ -617,11 +617,100 @@ function tileRegionIntersects(region, bb) {
   return !(e < bb.w || w > bb.e || n < bb.s || s > bb.n);
 }
 
+// ── Auto-texturing for untextured (white-model) tiles ──────────────────
+// Borrowed from the approach of PLATEAU's Auto-Create-bldg-lod2-tool:
+// roofs textured from ortho aerial imagery, walls from generated facade
+// imagery. That tool is an offline pipeline (DSM point clouds + oriented
+// oblique photos + ML roof-line detection); in the browser we approximate
+// both inputs with what we already have:
+//   roofs  ← project the SAME aerial photo the terrain uses (true ortho
+//            content for roofs, seamless with the ground because it IS
+//            the ground texture),
+//   walls  ← the procedural window-grid facade canvases from
+//            buildings.js with metre-true UVs (8 m horizontal / 4 m
+//            vertical per tile, same convention as OSM walls).
+// Meshes that already carry photo textures are left untouched.
+//
+// Geometry: each untextured mesh is split by world-space face normal —
+// up-facing triangles (ny > 0.5) become the roof mesh, the rest the wall
+// mesh. Positions are baked in WORLD space and the new meshes attach to
+// the identity root, so downstream transforms (vertical-align shift,
+// cull) behave exactly as before.
+function _autoTexturePlateau(root, aerialTex, bb) {
+  const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
+  const targets = [];
+  root.updateMatrixWorld(true);
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    if (mats.length && mats.every(m => m && !m.map)) targets.push(o);
+  });
+  if (!targets.length) return;
+
+  const roofMat = new THREE.MeshLambertMaterial({ map: aerialTex, side: THREE.DoubleSide });
+  roofMat.name = 'plateau_roof_aerial';
+  const WALL_TONES = [0xeae4d8, 0xe3dcd2, 0xefe8da, 0xe0d8cc];
+  const wallMats = WALL_TONES.map((tone, i) => {
+    const mat = (typeof makeFacadeTexture === 'function')
+      ? new THREE.MeshLambertMaterial({ map: makeFacadeTexture(tone, 'office', i) })
+      : new THREE.MeshLambertMaterial({ color: tone });
+    mat.name = 'plateau_wall_facade_' + i;
+    return mat;
+  });
+
+  const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3(), nrm = new THREE.Vector3();
+  const buildMesh = (positions, uvs, mat) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    g.setAttribute('uv',       new THREE.Float32BufferAttribute(uvs, 2));
+    g.computeVertexNormals();
+    return new THREE.Mesh(g, mat);
+  };
+
+  let mi = 0;
+  for (const mesh of targets) {
+    const src = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry;
+    const pos = src.attributes.position;
+    const mw = mesh.matrixWorld;
+    const roofPos = [], roofUV = [], wallPos = [], wallUV = [];
+    for (let t = 0; t + 2 < pos.count; t += 3) {
+      va.fromBufferAttribute(pos, t).applyMatrix4(mw);
+      vb.fromBufferAttribute(pos, t + 1).applyMatrix4(mw);
+      vc.fromBufferAttribute(pos, t + 2).applyMatrix4(mw);
+      nrm.crossVectors(ab.subVectors(vb, va), ac.subVectors(vc, va)).normalize();
+      if (nrm.y > 0.5) {
+        for (const v of [va, vb, vc]) {
+          roofPos.push(v.x, v.y, v.z);
+          roofUV.push(v.x / xSize, 1 - v.z / zSize);
+        }
+      } else {
+        // Pick the horizontal run direction per face so window columns
+        // stay vertical: a wall facing ±Z runs along X and vice versa.
+        const runAlongX = Math.abs(nrm.x) <= Math.abs(nrm.z);
+        for (const v of [va, vb, vc]) {
+          wallPos.push(v.x, v.y, v.z);
+          wallUV.push((runAlongX ? v.x : v.z) / 8, v.y / 4);
+        }
+      }
+    }
+    if (roofPos.length) root.add(buildMesh(roofPos, roofUV, roofMat));
+    if (wallPos.length) root.add(buildMesh(wallPos, wallUV, wallMats[mi % wallMats.length]));
+    mi++;
+    if (mesh.parent) mesh.parent.remove(mesh);
+    if (src !== mesh.geometry) src.dispose();
+    mesh.geometry.dispose();
+    const oldMats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const m of oldMats) m && m.dispose();
+  }
+  console.log(`[PLATEAU] auto-textured ${targets.length} white mesh(es): aerial roofs + procedural facades`);
+}
+
 // ── Tile loader ────────────────────────────────────────────────────────
 // Walk the tile hierarchy, collect leaves whose region intersects bb, then
 // fetch + parse + add to scene with capped concurrency. No streaming LOD —
 // we load the smallest level of the hierarchy that covers the bbox.
-async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
+async function loadPlateauBuildings(tilesetUrl, bb, onProgress, opts) {
   if (typeof THREE.GLTFLoader !== 'function') {
     throw new Error('GLTFLoader not loaded — add the three GLTFLoader script tag');
   }
@@ -712,10 +801,15 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
   // Decompose the ECEF→local matrix into position/quaternion/scale so we
   // can keep matrixAutoUpdate = true and let the renderer's normal
   // matrixWorld pipeline handle it. Same trick for per-tile transforms.
+  // `root` (identity) wraps the transformed tiles group so the auto-
+  // texture pass can attach world-space-baked meshes alongside it.
   const ecefToLocal = buildEcefToLocalMatrix(bb);
+  const root = new THREE.Group();
+  root.name = 'plateau';
   const group = new THREE.Group();
-  group.name = 'plateau';
+  group.name = 'plateau-tiles';
   ecefToLocal.decompose(group.position, group.quaternion, group.scale);
+  root.add(group);
 
   // GLTFLoader + DRACOLoader. PLATEAU's LOD2 glb tiles use Draco mesh
   // compression — without this every loader.parse() throws "No DRACOLoader
@@ -906,15 +1000,28 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress) {
     console.warn('[PLATEAU] all tiles failed to load — falling back to OSM');
     return null;
   }
-  // Report the group's local-space bounds so we can see if buildings land
+  const tileCount = group.children.length;
+
+  // Auto-texture untextured (white-model) meshes: aerial-photo roofs +
+  // procedural facades. Failure here must never lose the buildings —
+  // worst case we keep the plain white model.
+  if (opts && opts.aerialTex) {
+    try {
+      _autoTexturePlateau(root, opts.aerialTex, bb);
+    } catch (e) {
+      console.warn('[PLATEAU] auto-texture failed (keeping white model):', e);
+    }
+  }
+
+  // Report the root's local-space bounds so we can see if buildings land
   // at sane coordinates (a few hundred metres span, Y near ground level)
   // vs. wildly off (transform bug).
-  group.updateMatrixWorld(true);
-  const dbgBox = new THREE.Box3().setFromObject(group);
+  root.updateMatrixWorld(true);
+  const dbgBox = new THREE.Box3().setFromObject(root);
   console.log('[PLATEAU] group bounds (local m):',
     'x', dbgBox.min.x.toFixed(0), '→', dbgBox.max.x.toFixed(0),
     '| y', dbgBox.min.y.toFixed(0), '→', dbgBox.max.y.toFixed(0),
     '| z', dbgBox.min.z.toFixed(0), '→', dbgBox.max.z.toFixed(0));
-  console.log(`[PLATEAU] rendered ${group.children.length} tile(s)`);
-  return group;
+  console.log(`[PLATEAU] rendered ${tileCount} tile(s)`);
+  return root;
 }

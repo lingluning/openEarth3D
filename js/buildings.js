@@ -680,6 +680,27 @@ function resetBuildingCaches() {
   for (const k in _roofTexCache) delete _roofTexCache[k];
   for (const k in _shopfrontCache) delete _shopfrontCache[k];
   _roofEquipMat = null;  // disposed by clearSceneObjects; rebuild next run
+  _aerialRoof = null;
+}
+
+// ── Aerial-photo roof projection (Auto-Create-bldg-lod2-tool style) ────────
+// When createBuildingGroup gets the aerial CanvasTexture, FLAT roofs are
+// textured by projecting the same ortho photo the terrain uses: the photo
+// genuinely contains every roof as seen from above, and it lines up
+// seamlessly with the ground because it IS the ground texture. Pitched
+// roofs keep their procedural tile/shingle look (an ortho photo of a
+// pitched roof smeared across sloped faces looks wrong).
+let _aerialRoof = null;   // { mat, xSize, zSize } for the current run
+
+function _aerialUVRoof(geo) {
+  const pos = geo.attributes.position;
+  const uvs = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uvs[i * 2]     = pos.getX(i) / _aerialRoof.xSize;
+    uvs[i * 2 + 1] = 1 - pos.getZ(i) / _aerialRoof.zSize;
+  }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  return geo;
 }
 
 function _getWallMat(style, bucket = 0) {
@@ -1052,16 +1073,23 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
              material: _getWallMat(style, bucket) });
 
   const pitched = roofShape !== 'flat' && roofH > 0.5;
-  out.push({ geometry: _makeRoofGeo(roofShape, pts2d, wallTop, roofTop),
-             material: _getRoofMat(style, pitched, bucket) });
+  if (roofShape === 'flat' && _aerialRoof) {
+    out.push({ geometry: _aerialUVRoof(_makeRoofGeo('flat', pts2d, wallTop, roofTop)),
+               material: _aerialRoof.mat });
+  } else {
+    out.push({ geometry: _makeRoofGeo(roofShape, pts2d, wallTop, roofTop),
+               material: _getRoofMat(style, pitched, bucket) });
+  }
 
   // Parapet on tall flat roofs.
   if (roofShape === 'flat' && totalH >= 6 && building.area >= 25) {
     const parapetH = Math.min(1.0, 0.4 + totalH * 0.012);
     out.push({ geometry: _makeWallsGeo(pts2d, wallTop, wallTop + parapetH),
                material: _getWallMat(style, bucket) });
-    out.push({ geometry: _makeFlatRoofGeo(pts2d, wallTop + parapetH),
-               material: _getRoofMat(style, false, bucket) });
+    const innerRoof = _makeFlatRoofGeo(pts2d, wallTop + parapetH);
+    out.push(_aerialRoof
+      ? { geometry: _aerialUVRoof(innerRoof), material: _aerialRoof.mat }
+      : { geometry: innerRoof, material: _getRoofMat(style, false, bucket) });
   }
 
   // Rooftop equipment (HVAC / water tank / stairwell box) on flat roofs.
@@ -1102,7 +1130,15 @@ function _concatGeometries(geos) {
   return merged;
 }
 
-function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag) {
+function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag, opts) {
+  // Aerial roof projection for this run (see _aerialRoof). Set before any
+  // buildingToParts call; reset by resetBuildingCaches between runs.
+  _aerialRoof = null;
+  if (opts && opts.aerialTex) {
+    const mat = new THREE.MeshLambertMaterial({ map: opts.aerialTex, side: THREE.DoubleSide });
+    mat.name = 'roof_aerial';
+    _aerialRoof = { mat, xSize: bboxXSize(bb), zSize: bboxZSize(bb) };
+  }
   // Collect every geometry part across all buildings, keyed by material.
   const byMaterial = new Map();
   for (const b of buildings) {
