@@ -655,7 +655,18 @@ function _autoTexturePlateau(root, aerialTex, bb, facadePalette, cc0Walls) {
   // (concrete/brick/metal mix) and let geographic variety emerge.
   let wallMats;
   if (cc0Walls && cc0Walls.size) {
-    wallMats = [...cc0Walls.values()].map((tex, i) => {
+    // PLATEAU LOD2 white models carry no per-mesh building type, so
+    // cycling the WHOLE CC0 catalog (brick + wood + corrugated metal)
+    // sprinkles bright orange brick walls onto random skyscrapers
+    // (seen in Osaka where 100 m office blocks ended up brick-textured).
+    // Restrict to concrete-family entries that scan as "modern city
+    // building" at any height — apartments-style painted concrete,
+    // plain concrete panels, generic fallback. Brick/wood/metal stay
+    // available for OSM where they're driven by building:material tags.
+    const SAFE_KEYS = ['concrete', 'office', 'apartments', 'commercial', 'generic'];
+    const safe = SAFE_KEYS.map(k => cc0Walls.get(k)).filter(Boolean);
+    const pool = safe.length ? safe : [...cc0Walls.values()];
+    wallMats = pool.map((tex, i) => {
       const mat = new THREE.MeshLambertMaterial({ map: tex });
       mat.name = 'plateau_wall_cc0_' + i;
       return mat;

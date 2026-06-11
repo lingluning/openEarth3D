@@ -359,12 +359,17 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
   const key = `${wallHex.toString(16)}_${type}_${bucket}`;
   if (_facadeCache[key]) return _facadeCache[key];
 
-  const W = 256, H = 512;
+  // 512 × 1024 — double resolution of the v1 canvas. Keeps window detail
+  // legible from a few hundred metres away (the worst case is medium
+  // distance where mipmap blur eats sub-pixel features; the extra res
+  // pushes that distance further out). One texture repeat is meant to
+  // cover ROWS storeys vertically and ~5 windows horizontally, so the
+  // per-pixel world size is ~3 cm horizontal × 3 cm vertical for an
+  // 8 m × 30 m repeat — plenty for windows.
+  const W = 512, H = 1024;
   const cvs = document.createElement('canvas');
   cvs.width = W; cvs.height = H;
   const ctx = cvs.getContext('2d');
-  // Reproducible randomness per bucket — same bucket always gives the
-  // same window-light pattern, AC unit placement, etc.
   const rng = _seededRng(((wallHex << 4) ^ bucket * 0x9e37) >>> 0);
 
   const r = (wallHex >> 16) & 0xff;
@@ -374,126 +379,201 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
   ctx.fillStyle = `rgb(${r},${g},${b})`;
   ctx.fillRect(0, 0, W, H);
 
-  // Base material pattern under the windows, per facade type. Driven by
-  // OSM building:material via getBuildingStyle.
+  // ── Base material pattern under the windows ─────────────────────────
   if (type === 'brick') {
-    // Running-bond brick courses: ~8 px rows with alternate offsets,
-    // mortar joints darker, per-brick value jitter for a handmade read.
-    const courseH = 10, brickW = 26;
+    const courseH = 18, brickW = 52;
     for (let y = 0; y < H; y += courseH) {
       const offset = (y / courseH) % 2 ? brickW / 2 : 0;
       for (let x = -brickW; x < W + brickW; x += brickW) {
-        const shade = (rng() - 0.5) * 22;
-        ctx.fillStyle = `rgb(${Math.max(0, Math.min(255, r + shade))},` +
-                        `${Math.max(0, Math.min(255, g + shade * 0.8))},` +
-                        `${Math.max(0, Math.min(255, b + shade * 0.7))})`;
-        ctx.fillRect(x + offset + 1, y + 1, brickW - 2, courseH - 2);
+        const shade = (rng() - 0.5) * 28;
+        ctx.fillStyle = `rgb(${_clamp8(r + shade)},${_clamp8(g + shade * 0.8)},${_clamp8(b + shade * 0.7)})`;
+        ctx.fillRect(x + offset + 2, y + 2, brickW - 3, courseH - 3);
       }
     }
-    ctx.strokeStyle = 'rgba(0,0,0,0.10)';
   } else if (type === 'wood') {
-    // Vertical plank siding: ~12 px boards with value jitter + grain.
-    const plankW = 13;
+    const plankW = 22;
     for (let x = 0; x < W; x += plankW) {
-      const shade = (rng() - 0.5) * 26;
-      ctx.fillStyle = `rgb(${Math.max(0, Math.min(255, r + shade))},` +
-                      `${Math.max(0, Math.min(255, g + shade * 0.85))},` +
-                      `${Math.max(0, Math.min(255, b + shade * 0.6))})`;
+      const shade = (rng() - 0.5) * 30;
+      ctx.fillStyle = `rgb(${_clamp8(r + shade)},${_clamp8(g + shade * 0.85)},${_clamp8(b + shade * 0.6)})`;
       ctx.fillRect(x + 1, 0, plankW - 2, H);
-    }
-    ctx.strokeStyle = 'rgba(40,24,8,0.18)';
-    for (let x = 0; x < W; x += plankW) {
+      ctx.strokeStyle = 'rgba(40,24,8,0.22)';
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
     }
   } else if (type === 'metal') {
-    // Corrugated panel: fine alternating vertical light/dark ribs.
-    for (let x = 0; x < W; x += 6) {
+    for (let x = 0; x < W; x += 12) {
       ctx.fillStyle = 'rgba(255,255,255,0.10)';
-      ctx.fillRect(x, 0, 2, H);
+      ctx.fillRect(x, 0, 4, H);
       ctx.fillStyle = 'rgba(0,0,0,0.10)';
-      ctx.fillRect(x + 3, 0, 2, H);
+      ctx.fillRect(x + 6, 0, 4, H);
     }
+  } else if (type === 'concrete') {
+    // Coarse-aggregate noise — gives the wall a real material read
+    // instead of a flat slab. Cheap: 1 px noise sparkles, denser bands
+    // at panel joints.
+    const idata = ctx.getImageData(0, 0, W, H);
+    const px = idata.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const n = (rng() - 0.5) * 18;
+      px[i]     = _clamp8(px[i]     + n);
+      px[i + 1] = _clamp8(px[i + 1] + n);
+      px[i + 2] = _clamp8(px[i + 2] + n);
+    }
+    ctx.putImageData(idata, 0, 0);
   }
 
-  ctx.strokeStyle = `rgba(0,0,0,0.12)`;
-  ctx.lineWidth = 1;
-  for (let y = 22; y < H; y += 22) {
+  // ── Window grid ──────────────────────────────────────────────────────
+  // Bigger windows, real depth (recess shadow), mullions, sub-panes,
+  // varied per-window lighting and shading suggestion. The grid is
+  // sized so ROWS rows fill the height and one row reads as one storey.
+  const COLS = type === 'glass' ? 5 : type === 'metal' ? 4 : 5;
+  const ROWS = type === 'glass' ? 8 : type === 'metal' ? 6 : 10;
+  const padX = W * 0.04;
+  const stepX = (W - padX * 2) / COLS;
+  const stepY = H / ROWS;
+  const winW = stepX * (type === 'glass' ? 0.84 : type === 'metal' ? 0.55 : 0.66);
+  const winH = stepY * (type === 'glass' ? 0.78 : type === 'metal' ? 0.45 : 0.62);
+
+  // Floor-plate horizontal line for every storey — visible at distance
+  // (one of the few features that survives mipmap blur and so makes a
+  // distant building still read as a building rather than a slab).
+  ctx.strokeStyle = `rgba(0,0,0,${type === 'glass' ? 0.18 : 0.14})`;
+  ctx.lineWidth = 2;
+  for (let row = 0; row <= ROWS; row++) {
+    const y = row * stepY;
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   }
-
-  const COLS = type === 'glass' ? 4 : type === 'metal' ? 3 : 5;
-  const ROWS = type === 'glass' ? 8 : type === 'metal' ? 6 : 10;
-  const padX = 16, padY = 22;
-  const stepX = (W - padX * 2) / COLS;
-  const stepY = (H - padY * 2) / ROWS;
-  const winW = stepX * (type === 'glass' ? 0.78 : 0.60);
-  const winH = stepY * (type === 'glass' ? 0.72 : 0.55);
-
-  // Concrete-style buildings get an optional balcony rail on a random
-  // row — extra horizontal detail that distinguishes apartments from
-  // offices. Glass curtain-walls don't have these.
-  let balconyRow = -1;
-  if (type === 'concrete' && rng() < 0.6) {
-    balconyRow = Math.floor(rng() * (ROWS - 2)) + 1;
+  // Subtle horizontal band per floor: tints alternate floors by ±2 L —
+  // a building-shape silhouette emerges even at extreme mip levels.
+  for (let row = 0; row < ROWS; row++) {
+    if (row % 2) continue;
+    ctx.fillStyle = 'rgba(0,0,0,0.04)';
+    ctx.fillRect(0, row * stepY, W, stepY);
   }
+
+  // Per-floor light bias so adjacent floors aren't independently random
+  // (real apartments have whole-floor occupancy patterns).
+  const floorLitBias = [];
+  for (let row = 0; row < ROWS; row++) floorLitBias.push(rng());
+
+  // Per-column horizontal jitter once per column — windows on the same
+  // column align between floors (real buildings do this almost without
+  // exception; the old per-cell jitter looked drunk).
+  const colJit = [];
+  for (let col = 0; col < COLS; col++) colJit.push((rng() - 0.5) * 4);
 
   for (let row = 0; row < ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
-      // ±2 px jitter so the grid doesn't look like graph paper.
-      const wx = padX + col * stepX + (stepX - winW) / 2 + (rng() - 0.5) * 3;
-      const wy = padY + row * stepY + (stepY - winH) / 2 + (rng() - 0.5) * 3;
+      const wx = padX + col * stepX + (stepX - winW) / 2 + colJit[col];
+      const wy = row * stepY + (stepY - winH) / 2;
+
+      // 1. Recessed frame: a darker rectangle slightly larger than the
+      // glass, giving every window a hint of depth.
+      ctx.fillStyle = `rgba(${_clamp8(r * 0.35)},${_clamp8(g * 0.35)},${_clamp8(b * 0.35)},0.55)`;
+      ctx.fillRect(wx - 2, wy - 1, winW + 4, winH + 3);
+
+      // 2. Glass itself.
       if (type === 'glass') {
-        const grad = ctx.createLinearGradient(wx, wy, wx + winW, wy + winH);
-        grad.addColorStop(0, 'rgba(140,210,240,0.88)');
-        grad.addColorStop(0.5, 'rgba(100,180,220,0.75)');
-        grad.addColorStop(1, 'rgba(60,140,190,0.82)');
-        ctx.fillStyle = grad;
+        // Curtain-wall: cool blue gradient simulating sky reflection.
+        const g1 = ctx.createLinearGradient(wx, wy, wx, wy + winH);
+        g1.addColorStop(0,    'rgb(170,215,240)');
+        g1.addColorStop(0.45, 'rgb(120,185,225)');
+        g1.addColorStop(1,    'rgb(70,140,195)');
+        ctx.fillStyle = g1;
         ctx.fillRect(wx, wy, winW, winH);
-        ctx.fillStyle = 'rgba(255,255,255,0.18)';
-        ctx.fillRect(wx + 2, wy + 2, winW * 0.35, winH * 0.4);
+        // Building-across reflection — diagonal slash darker.
+        const refl = ctx.createLinearGradient(wx, wy + winH * 0.3, wx + winW, wy + winH * 0.7);
+        refl.addColorStop(0,    'rgba(255,255,255,0.0)');
+        refl.addColorStop(0.45, 'rgba(255,255,255,0.18)');
+        refl.addColorStop(0.5,  'rgba(255,255,255,0.0)');
+        ctx.fillStyle = refl;
+        ctx.fillRect(wx, wy, winW, winH);
       } else {
-        const lit = rng() > 0.22;
-        ctx.fillStyle = lit ? 'rgba(200,228,255,0.80)' : 'rgba(22,30,50,0.86)';
-        ctx.fillRect(wx, wy, winW, winH);
+        const litRoll = (floorLitBias[row] * 0.7 + rng() * 0.3);
+        const lit = litRoll > 0.32;
         if (lit) {
-          ctx.strokeStyle = 'rgba(180,210,240,0.6)';
-          ctx.lineWidth = 0.8;
-          ctx.beginPath();
-          ctx.moveTo(wx + winW * 0.5, wy);
-          ctx.lineTo(wx + winW * 0.5, wy + winH);
-          ctx.stroke();
+          // Warm interior tint + sky reflection on top.
+          const gradL = ctx.createLinearGradient(wx, wy, wx, wy + winH);
+          gradL.addColorStop(0,   'rgb(200,225,245)');
+          gradL.addColorStop(0.4, 'rgb(225,220,200)');
+          gradL.addColorStop(1,   'rgb(200,190,170)');
+          ctx.fillStyle = gradL;
+        } else {
+          // Dark — shows interior shadow with a soft sky reflection.
+          const gradD = ctx.createLinearGradient(wx, wy, wx, wy + winH);
+          gradD.addColorStop(0,   'rgb(80,95,120)');
+          gradD.addColorStop(0.5, 'rgb(30,42,62)');
+          gradD.addColorStop(1,   'rgb(22,30,46)');
+          ctx.fillStyle = gradD;
         }
-        // 5 % chance: small AC unit hanging off the side of an unlit window
-        if (!lit && rng() < 0.05) {
-          ctx.fillStyle = 'rgba(168,168,160,1.0)';
-          ctx.fillRect(wx + winW + 1, wy + winH * 0.3, 7, winH * 0.45);
-          ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-          ctx.strokeRect(wx + winW + 1, wy + winH * 0.3, 7, winH * 0.45);
+        ctx.fillRect(wx, wy, winW, winH);
+
+        // 10% of unlit windows: blind/curtain partially drawn.
+        if (!lit && rng() < 0.22) {
+          const blindH = winH * (0.3 + rng() * 0.55);
+          ctx.fillStyle = 'rgba(220,210,190,0.85)';
+          ctx.fillRect(wx, wy, winW, blindH);
+          // Blind slat shadows
+          ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+          ctx.lineWidth = 1;
+          for (let by = wy + 3; by < wy + blindH; by += 4) {
+            ctx.beginPath(); ctx.moveTo(wx, by); ctx.lineTo(wx + winW, by); ctx.stroke();
+          }
         }
       }
-      ctx.strokeStyle = 'rgba(0,0,0,0.22)';
-      ctx.lineWidth = 0.8;
+
+      // 3. Mullions — vertical centre + horizontal middle. 2 panes wide
+      // × 2 panes tall = 4-pane window, which is what most apartment
+      // and office windows actually look like.
+      ctx.fillStyle = `rgba(${_clamp8(r * 0.5)},${_clamp8(g * 0.5)},${_clamp8(b * 0.5)},0.8)`;
+      ctx.fillRect(wx + winW / 2 - 0.6, wy, 1.2, winH);
+      ctx.fillRect(wx, wy + winH / 2 - 0.6, winW, 1.2);
+
+      // 4. Outer frame line — crisp black-ish.
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.lineWidth = 1.2;
       ctx.strokeRect(wx, wy, winW, winH);
+
+      // 5. Sill — small light strip just under the window for shadow
+      // contrast, helps the eye read 3D depth from a flat texture.
+      ctx.fillStyle = 'rgba(255,255,255,0.25)';
+      ctx.fillRect(wx - 2, wy + winH + 2, winW + 4, 1.5);
+
+      // 6. AC unit (residential only, ~6% of unlit windows).
+      if (type === 'concrete' && rng() < 0.06) {
+        const acX = wx + winW - 8, acY = wy + winH * 0.55;
+        ctx.fillStyle = 'rgb(190,190,182)';
+        ctx.fillRect(acX, acY, 18, winH * 0.38);
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+        ctx.strokeRect(acX, acY, 18, winH * 0.38);
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        for (let li = 0; li < 4; li++) ctx.fillRect(acX + 2, acY + 4 + li * 4, 14, 1);
+      }
     }
-    // Balcony rail across the row (drawn over the windows we just painted
-    // below the rail line). Subtle horizontal dark band reads as railing.
-    if (row === balconyRow) {
-      const y = padY + row * stepY + stepY * 0.92;
-      ctx.fillStyle = 'rgba(60,45,32,0.55)';
-      ctx.fillRect(0, y, W, 2.2);
-      // Vertical balusters
-      ctx.fillStyle = 'rgba(60,45,32,0.40)';
-      for (let bx = 4; bx < W; bx += 8) ctx.fillRect(bx, y - 5, 1, 6);
-    }
+  }
+
+  // Mipmap-friendly post: subtle vignette on each floor so a heavily
+  // shrunk version still shows horizontal banding (= floors).
+  for (let row = 0; row < ROWS; row++) {
+    const y0 = row * stepY;
+    const grd = ctx.createLinearGradient(0, y0, 0, y0 + stepY);
+    grd.addColorStop(0,    'rgba(255,255,255,0.05)');
+    grd.addColorStop(0.92, 'rgba(0,0,0,0.05)');
+    grd.addColorStop(1,    'rgba(0,0,0,0.18)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, y0, W, stepY);
   }
 
   const tex = new THREE.CanvasTexture(cvs);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.encoding = THREE.sRGBEncoding;
+  tex.anisotropy = 8;            // sharper at grazing angles
+  tex.minFilter = THREE.LinearMipMapLinearFilter;
   tex.name = 'facade_' + key;
   _facadeCache[key] = tex;
   return tex;
 }
+
+function _clamp8(v) { return Math.max(0, Math.min(255, v | 0)); }
 
 // ── Shopfront texture — bottom 3.5 m of commercial / mixed-use buildings ──
 // Big glass storefronts + a coloured signage band at the top. Bucket picks
