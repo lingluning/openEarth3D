@@ -38,6 +38,19 @@ function setProgress(pct, label) {
 
 function showProgress(v) {
   document.getElementById('progressWrap').style.display = v ? 'flex' : 'none';
+  // Showing the bar cancels any pending auto-hide: otherwise a hide timer
+  // armed at the end of the PREVIOUS run fires part-way through this one
+  // and blanks the progress UI while work is still going.
+  if (v) cancelProgressHide();
+}
+
+let _progressHideTimer = null;
+function cancelProgressHide() {
+  if (_progressHideTimer != null) { clearTimeout(_progressHideTimer); _progressHideTimer = null; }
+}
+function scheduleProgressHide(ms) {
+  cancelProgressHide();
+  _progressHideTimer = setTimeout(() => { _progressHideTimer = null; showProgress(false); }, ms);
 }
 
 // Show a transient error in the progress label instead of a blocking alert.
@@ -50,11 +63,8 @@ function showError(msg) {
   if (label) {
     label.textContent = '❌ ' + msg;
     label.style.color = '#ff8a8a';
-    setTimeout(() => {
-      label.style.color = '';
-      // Only auto-hide if no run is in flight (run() manages it otherwise).
-      if (document.getElementById('runBtn').disabled === false) showProgress(false);
-    }, 6000);
+    scheduleProgressHide(6000);
+    setTimeout(() => { label.style.color = ''; }, 6000);
   }
 }
 
@@ -65,9 +75,7 @@ function showStatus(msg) {
   const label = document.getElementById('progressLabel');
   if (label) {
     label.textContent = msg;
-    setTimeout(() => {
-      if (document.getElementById('runBtn').disabled === false) showProgress(false);
-    }, 4000);
+    scheduleProgressHide(4000);
   }
 }
 
@@ -338,6 +346,83 @@ function downloadScreenshot() {
   }, 'image/png');
 }
 
+// Remove every triangle whose world-space centroid falls outside the map
+// rectangle (plus `margin`), rewriting each mesh's geometry in place.
+// Triangle granularity is what makes this correct for PLATEAU, where one
+// mesh can hold an entire district. Returns { total, removed } counts.
+function cullGeometryOutside(group, xSize, zSize, margin) {
+  group.updateMatrixWorld(true);
+  const lo = -margin, hiX = xSize + margin, hiZ = zSize + margin;
+  const v = new THREE.Vector3();
+  let total = 0, removed = 0;
+  const doomed = [];
+
+  group.traverse(o => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+    const src = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry;
+    const pos = src.attributes.position;
+    const uv = src.attributes.uv, nrm = src.attributes.normal;
+    const triCount = Math.floor(pos.count / 3);
+    total += triCount;
+
+    // First pass: decide, so we can allocate exactly and bail out early
+    // when nothing changes (the common case for a fully-inside mesh).
+    const keep = new Uint8Array(triCount);
+    let kept = 0;
+    for (let t = 0; t < triCount; t++) {
+      let cx = 0, cz = 0;
+      for (let k = 0; k < 3; k++) {
+        v.fromBufferAttribute(pos, t * 3 + k).applyMatrix4(o.matrixWorld);
+        cx += v.x; cz += v.z;
+      }
+      cx /= 3; cz /= 3;
+      if (cx >= lo && cx <= hiX && cz >= lo && cz <= hiZ) { keep[t] = 1; kept++; }
+    }
+    if (kept === triCount) { if (src !== o.geometry) src.dispose(); return; }
+    removed += triCount - kept;
+
+    if (kept === 0) { doomed.push(o); if (src !== o.geometry) src.dispose(); return; }
+
+    const np = new Float32Array(kept * 9);
+    const nu = uv  ? new Float32Array(kept * 6) : null;
+    const nn = nrm ? new Float32Array(kept * 9) : null;
+    let w = 0;
+    for (let t = 0; t < triCount; t++) {
+      if (!keep[t]) continue;
+      for (let k = 0; k < 3; k++) {
+        const s = t * 3 + k;
+        np[w * 9 + k * 3]     = pos.getX(s);
+        np[w * 9 + k * 3 + 1] = pos.getY(s);
+        np[w * 9 + k * 3 + 2] = pos.getZ(s);
+        if (nn) {
+          nn[w * 9 + k * 3]     = nrm.getX(s);
+          nn[w * 9 + k * 3 + 1] = nrm.getY(s);
+          nn[w * 9 + k * 3 + 2] = nrm.getZ(s);
+        }
+        if (nu) {
+          nu[w * 6 + k * 2]     = uv.getX(s);
+          nu[w * 6 + k * 2 + 1] = uv.getY(s);
+        }
+      }
+      w++;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(np, 3));
+    if (nn) g.setAttribute('normal', new THREE.BufferAttribute(nn, 3));
+    if (nu) g.setAttribute('uv', new THREE.BufferAttribute(nu, 2));
+    if (!nn) g.computeVertexNormals();
+    if (src !== o.geometry) src.dispose();
+    o.geometry.dispose();
+    o.geometry = g;
+  });
+
+  for (const o of doomed) {
+    if (o.parent) o.parent.remove(o);
+    if (o.geometry) o.geometry.dispose();
+  }
+  return { total, removed };
+}
+
 async function run() {
   const lat = parseFloat(document.getElementById('latInput').value);
   const lon = parseFloat(document.getElementById('lonInput').value);
@@ -413,6 +498,13 @@ async function run() {
   currentTerrain = buildTerrain(elevGrid, meshN, xSize, zSize, aerialTex, vertExag);
   scene.add(currentTerrain);
   placeCameraOverTerrain(elevGrid, meshN, xSize, zSize, vertExag);
+  // Size the sun's orthographic shadow frustum to this scene. Headroom
+  // above the highest terrain point covers towers we haven't built yet.
+  let maxElev = -Infinity;
+  for (let r = 0; r < meshN; r++) for (let c = 0; c < meshN; c++) {
+    if (elevGrid[r][c] > maxElev) maxElev = elevGrid[r][c];
+  }
+  fitSunToScene(xSize, zSize, maxElev * vertExag + 300);
   currentBuildings = null;
   currentFeatures = null;
   currentBuildingData = null;   // PLATEAU path leaves this null (no footprints)
@@ -528,42 +620,26 @@ async function run() {
           if (plateauGroup.children.length) {
             plateauGroup.updateMatrixWorld(true);
 
-            // ── Cull buildings outside the requested area ─────────────────
-            // A single PLATEAU b3dm tile covers a whole district (~2 km),
-            // far larger than a 1 km request. We keep a tile if its region
-            // merely TOUCHES the bbox, so one corner-touching tile drags in
-            // buildings that sprawl 1–1.5 km past the map edge, floating
-            // over no terrain / aerial. Cull per-building: in world space the
-            // group's coords ARE the local map metres (terrain sits at scene
-            // origin, 0→xSize × 0→zSize), so drop any mesh whose centre falls
-            // outside the map plus a small margin for border straddlers.
+            // ── Cull geometry outside the requested area ──────────────────
+            // A PLATEAU b3dm tile covers a whole district (~2 km) and a tile
+            // is kept when its region merely TOUCHES the bbox, so a 1 km
+            // request drags in buildings sprawling far past the map edge,
+            // floating over no terrain.
+            //
+            // This used to test each MESH's bounding-box CENTRE, which is the
+            // wrong granularity in both directions: a PLATEAU mesh is a whole
+            // tile's worth of merged buildings (and after auto-texturing, the
+            // entire city's roofs are one mesh), so a mesh straddling the edge
+            // had every one of its in-map buildings deleted because its centre
+            // happened to fall outside — while a mesh centred inside kept all
+            // of its out-of-map sprawl. Cull per TRIANGLE instead: exact, and
+            // independent of how the source happens to group its meshes.
             const MARGIN = 120;   // metres of slack beyond the map edge
-            let meshCount = 0;
-            const toCull = [];
-            plateauGroup.traverse(o => {
-              if (!o.isMesh) return;
-              meshCount++;
-              const b = new THREE.Box3().setFromObject(o);
-              if (!isFinite(b.min.x)) return;
-              const cxw = (b.min.x + b.max.x) / 2, czw = (b.min.z + b.max.z) / 2;
-              if (cxw < -MARGIN || cxw > xSize + MARGIN ||
-                  czw < -MARGIN || czw > zSize + MARGIN) toCull.push(o);
-            });
-            // Safety: if the filter would wipe out (almost) everything, our
-            // local-coordinate assumption is wrong for this dataset — better
-            // to show the buildings sprawling than a blank scene. Skip cull.
-            if (meshCount > 0 && toCull.length < meshCount * 0.95) {
-              for (const o of toCull) {
-                if (o.parent) o.parent.remove(o);
-                if (o.geometry) o.geometry.dispose();
-              }
-              if (toCull.length) {
-                console.log(`[PLATEAU] culled ${toCull.length}/${meshCount} building(s) outside the ${km} km area`);
-                plateauGroup.updateMatrixWorld(true);
-              }
-            } else if (toCull.length) {
-              console.warn(`[PLATEAU] cull skipped — would remove ${toCull.length}/${meshCount} ` +
-                `(coordinate assumption likely off)`);
+            const culled = cullGeometryOutside(plateauGroup, xSize, zSize, MARGIN);
+            if (culled.removed) {
+              console.log(`[PLATEAU] culled ${culled.removed}/${culled.total} triangle(s) ` +
+                `outside the ${km} km area`);
+              plateauGroup.updateMatrixWorld(true);
             }
 
             // ── Vertical alignment ───────────────────────────────────────
@@ -675,14 +751,19 @@ async function run() {
   // the user whether they got PLATEAU or OSM (and any ⚠️ partial-failure
   // note). Overwriting it with 完了 in the same tick made it unreadable.
   document.getElementById('progressBar').style.width = '100%';
-  setTimeout(() => showProgress(false), 4000);
-  setExportEnabled(true);
+  scheduleProgressHide(4000);
 
   } catch (e) {
     console.error('run() failed:', e);
     showError('生成失敗: ' + (e.message || e));
   } finally {
     document.getElementById('runBtn').disabled = false;
+    // Re-enable export/share/screenshot even when the run threw. These
+    // were only re-enabled on the success path, so a single failed
+    // generate left 保存 / 共有URL / スクショ greyed out for the rest of
+    // the session with no way back short of a page reload — and after a
+    // partial failure there is usually still a scene worth exporting.
+    setExportEnabled(!!currentTerrain);
   }
 }
 

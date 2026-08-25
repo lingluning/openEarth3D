@@ -122,10 +122,18 @@ function _cc0LoadOne(entry, timeoutMs) {
         tex.encoding = THREE.sRGBEncoding;
         tex.anisotropy = 8;
         tex.minFilter = THREE.LinearMipMapLinearFilter;
-        // Tiled to the wall's UV span (set in _makeWallsGeo to
-        // segLen/8 horizontal, height/4 vertical) so each repeat
-        // covers worldSize metres of wall.
-        tex.repeat.set(8 / entry.worldSize, 4 / entry.worldSize);
+        // Wall UVs are (runLength / FACADE_REPEAT_WIDTH_M) horizontally and
+        // (height / facadeRepeatMetres(...)) vertically — i.e. one UV unit
+        // is 8 m across and ~30 m up. Scale the repeat so one tile of this
+        // photo covers worldSize metres in BOTH axes. The vertical figure
+        // used to be hardcoded to 4 m, which was already stale when the
+        // wall repeat moved to storey-based sizing and stretched every CC0
+        // texture ~7.5x vertically.
+        const vSpan = (typeof facadeRepeatMetres === 'function')
+          ? facadeRepeatMetres('concrete') : 30;
+        const hSpan = (typeof FACADE_REPEAT_WIDTH_M === 'number')
+          ? FACADE_REPEAT_WIDTH_M : 8;
+        tex.repeat.set(hSpan / entry.worldSize, vSpan / entry.worldSize);
         tex.name = entry.label;
         resolve(tex);
       },

@@ -355,6 +355,34 @@ function _seededRng(seed) {
 // ── Procedural facade textures ─────────────────────────────────────────────
 const _facadeCache = {};
 
+// ── Facade texture contract ────────────────────────────────────────────
+// makeFacadeTexture draws exactly FACADE_ROWS(type) window rows and
+// FACADE_COLS(type) window columns into ONE texture repeat. Every caller
+// that maps this texture onto geometry MUST size its UVs so that one
+// repeat spans FACADE_ROWS storeys vertically — otherwise the window
+// rhythm has nothing to do with the building.
+//
+// This used to be duplicated as magic numbers in three places and they
+// drifted: plateau.js mapped one repeat to 4 m of height while asking for
+// a 10-row texture, i.e. ten storeys crammed into 4 m (a 40 cm storey).
+// At any real camera distance mipmapping averaged that to flat grey —
+// which is exactly why PLATEAU buildings rendered as solid colour slabs.
+// Single source of truth now.
+const FACADE_STOREY_M = 3;                       // metres per window row
+function FACADE_ROWS(type) {
+  return type === 'glass' ? 8 : type === 'metal' ? 6 : 10;
+}
+function FACADE_COLS(type) {
+  return type === 'metal' ? 4 : 5;
+}
+// Metres of wall height covered by one full vertical texture repeat.
+function facadeRepeatMetres(type, storeyM) {
+  return FACADE_ROWS(type) * (storeyM || FACADE_STOREY_M);
+}
+// Metres of wall length covered by one full horizontal texture repeat.
+// _makeWallsGeo divides run length by 8, so this must stay 8.
+const FACADE_REPEAT_WIDTH_M = 8;
+
 function makeFacadeTexture(wallHex, type, bucket = 0) {
   const key = `${wallHex.toString(16)}_${type}_${bucket}`;
   if (_facadeCache[key]) return _facadeCache[key];
@@ -381,7 +409,10 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
 
   // ── Base material pattern under the windows ─────────────────────────
   if (type === 'brick') {
-    const courseH = 18, brickW = 52;
+    // Divisors of the 512x1024 canvas so the pattern wraps EXACTLY at the
+    // seam. 18 and 52 divide neither, so every tile boundary showed a
+    // sliced course and a broken bond.
+    const courseH = 16, brickW = 64;
     for (let y = 0; y < H; y += courseH) {
       const offset = (y / courseH) % 2 ? brickW / 2 : 0;
       for (let x = -brickW; x < W + brickW; x += brickW) {
@@ -391,7 +422,7 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
       }
     }
   } else if (type === 'wood') {
-    const plankW = 22;
+    const plankW = 32;      // 512 / 32 = 16 planks, exact wrap
     for (let x = 0; x < W; x += plankW) {
       const shade = (rng() - 0.5) * 30;
       ctx.fillStyle = `rgb(${_clamp8(r + shade)},${_clamp8(g + shade * 0.85)},${_clamp8(b + shade * 0.6)})`;
@@ -400,11 +431,11 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
     }
   } else if (type === 'metal') {
-    for (let x = 0; x < W; x += 12) {
+    for (let x = 0; x < W; x += 16) {   // 512 / 16 = 32 ribs, exact wrap
       ctx.fillStyle = 'rgba(255,255,255,0.10)';
-      ctx.fillRect(x, 0, 4, H);
+      ctx.fillRect(x, 0, 5, H);
       ctx.fillStyle = 'rgba(0,0,0,0.10)';
-      ctx.fillRect(x + 6, 0, 4, H);
+      ctx.fillRect(x + 8, 0, 5, H);
     }
   } else if (type === 'concrete') {
     // Coarse-aggregate noise — gives the wall a real material read
@@ -425,10 +456,14 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
   // Bigger windows, real depth (recess shadow), mullions, sub-panes,
   // varied per-window lighting and shading suggestion. The grid is
   // sized so ROWS rows fill the height and one row reads as one storey.
-  const COLS = type === 'glass' ? 5 : type === 'metal' ? 4 : 5;
-  const ROWS = type === 'glass' ? 8 : type === 'metal' ? 6 : 10;
-  const padX = W * 0.04;
-  const stepX = (W - padX * 2) / COLS;
+  const COLS = FACADE_COLS(type);
+  const ROWS = FACADE_ROWS(type);
+  // No side padding: with padX on both edges the gap between the last
+  // window of one repeat and the first of the next was 2*padX instead of
+  // one column pitch, printing a blank double-width pier every 8 m across
+  // every long wall. Full-width pitch tiles seamlessly.
+  const padX = 0;
+  const stepX = W / COLS;
   const stepY = H / ROWS;
   const winW = stepX * (type === 'glass' ? 0.84 : type === 'metal' ? 0.55 : 0.66);
   const winH = stepY * (type === 'glass' ? 0.78 : type === 'metal' ? 0.45 : 0.62);
@@ -488,21 +523,29 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
         ctx.fillStyle = refl;
         ctx.fillRect(wx, wy, winW, winH);
       } else {
+        // DAYLIGHT windows are DARKER than the wall, not brighter: you are
+        // looking into an unlit interior with a slice of sky reflected off
+        // the top of the pane. The previous version painted ~68 % of
+        // windows in the 200–225 range — indistinguishable from a
+        // 212,204,192 wall — so most of the grid was invisible and the
+        // facade read as a blank slab. Now the default is dark glass
+        // (strong contrast against any pale wall) and only a minority are
+        // warm-lit, which reads as occupancy rather than noise.
         const litRoll = (floorLitBias[row] * 0.7 + rng() * 0.3);
-        const lit = litRoll > 0.32;
+        const lit = litRoll > 0.86;
         if (lit) {
-          // Warm interior tint + sky reflection on top.
+          // Warm interior light spilling out.
           const gradL = ctx.createLinearGradient(wx, wy, wx, wy + winH);
-          gradL.addColorStop(0,   'rgb(200,225,245)');
-          gradL.addColorStop(0.4, 'rgb(225,220,200)');
-          gradL.addColorStop(1,   'rgb(200,190,170)');
+          gradL.addColorStop(0,   'rgb(255,238,196)');
+          gradL.addColorStop(0.4, 'rgb(246,220,166)');
+          gradL.addColorStop(1,   'rgb(214,182,130)');
           ctx.fillStyle = gradL;
         } else {
-          // Dark — shows interior shadow with a soft sky reflection.
+          // Dark interior with a sky reflection fading down the pane.
           const gradD = ctx.createLinearGradient(wx, wy, wx, wy + winH);
-          gradD.addColorStop(0,   'rgb(80,95,120)');
-          gradD.addColorStop(0.5, 'rgb(30,42,62)');
-          gradD.addColorStop(1,   'rgb(22,30,46)');
+          gradD.addColorStop(0,   'rgb(108,132,158)');
+          gradD.addColorStop(0.35, 'rgb(52,68,90)');
+          gradD.addColorStop(1,   'rgb(28,36,52)');
           ctx.fillStyle = gradD;
         }
         ctx.fillRect(wx, wy, winW, winH);
@@ -887,6 +930,20 @@ function _getShopfrontMat(style, bucket = 0) {
   return mat;
 }
 
+// Blank coping for parapets / upstands — never the window facade. Double
+// sided so looking down into a roof shows the parapet's inner face rather
+// than seeing straight through it.
+function _getParapetMat(style, bucket = 0) {
+  const off = HSL_OFFSETS[bucket % STYLE_VARIANTS];
+  const hex = _jitterHexHSL(style.roof, off.dh * 0.4, off.ds * 0.4, off.dl * 0.4 + 0.06);
+  const key = `parapet_${hex.toString(16)}`;
+  if (_matCache.roof[key]) return _matCache.roof[key];
+  const mat = new THREE.MeshLambertMaterial({ color: hex, side: THREE.DoubleSide });
+  mat.name = key;
+  _matCache.roof[key] = mat;
+  return mat;
+}
+
 function _getRoofMat(style, pitched, bucket = 0) {
   const off = HSL_OFFSETS[bucket % STYLE_VARIANTS];
   // Real rooftops vary less than walls — use half the wall jitter so the
@@ -1262,9 +1319,10 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   // so one full texture repeat spans rowsPerRepeat × floorH metres —
   // windows land at storey rhythm instead of an arbitrary fixed repeat.
   const levelsTag = _posFloat(tagsB['building:levels'] ?? tagsB.levels, 0);
-  const floorH = levelsTag > 0 ? Math.max(2.4, Math.min(5, totalH / levelsTag)) : 3;
-  const rowsPerRepeat = style.type === 'glass' ? 8 : style.type === 'metal' ? 6 : 10;
-  out.push({ geometry: _makeWallsGeo(pts2d, groundTopY, wallTop, floorH * rowsPerRepeat),
+  const floorH = levelsTag > 0
+    ? Math.max(2.4, Math.min(5, totalH / levelsTag)) : FACADE_STOREY_M;
+  out.push({ geometry: _makeWallsGeo(pts2d, groundTopY, wallTop,
+                                     facadeRepeatMetres(style.type, floorH)),
              material: _getWallMat(style, bucket) });
 
   const pitched = roofShape !== 'flat' && roofH > 0.5;
@@ -1276,15 +1334,20 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
                material: _getRoofMat(style, pitched, bucket) });
   }
 
-  // Parapet on tall flat roofs.
+  // Parapet on tall flat roofs — a low solid upstand around the roof deck.
+  //
+  // Two bugs used to live here. (1) It reused the WINDOW facade material,
+  // so every roof edge in the city wore a band of sliced windows. A real
+  // parapet is blank coping. (2) It then capped the top with a second roof
+  // surface at wallTop + parapetH, turning the parapet into a solid block
+  // that sealed over the actual roof deck at wallTop — which is also where
+  // _emitRoofEquipment places HVAC units, so every rooftop machine was
+  // entombed one parapet-height below a lid. Now: blank double-sided
+  // upstand, no lid, deck stays visible.
   if (roofShape === 'flat' && totalH >= 6 && building.area >= 25) {
     const parapetH = Math.min(1.0, 0.4 + totalH * 0.012);
-    out.push({ geometry: _makeWallsGeo(pts2d, wallTop, wallTop + parapetH),
-               material: _getWallMat(style, bucket) });
-    const innerRoof = _makeFlatRoofGeo(pts2d, wallTop + parapetH);
-    out.push(_aerialRoof
-      ? { geometry: _aerialUVRoof(innerRoof), material: _aerialRoof.mat }
-      : { geometry: innerRoof, material: _getRoofMat(style, false, bucket) });
+    out.push({ geometry: _makeWallsGeo(pts2d, wallTop, wallTop + parapetH, parapetH),
+               material: _getParapetMat(style, bucket) });
   }
 
   // Rooftop equipment (HVAC / water tank / stairwell box) on flat roofs.

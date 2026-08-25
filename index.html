@@ -217,11 +217,9 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
           <option value="384">超精細 — 384×384（~147k vert, z15 DEM + 補間）</option>
         </select>
       </div>
-      <!-- Time-of-day slider is a no-op under the SketchUp cartoon
-           lighting model. Hidden, not removed, so app.js's input handler
-           still finds the element. -->
-      <div style="display:none">
-        <label>時刻 <span id="hourLabel">13:30</span></label>
+      <div style="margin-top:10px">
+        <label>時刻 <span id="hourLabel" style="color:#81d4fa">13:30</span>
+          <span style="color:#81d4fa;font-size:0.72rem">（太陽の向き・影・空の色）☀️</span></label>
         <input type="range" id="timeOfDay" min="0" max="24" step="0.25" value="13.5"/>
       </div>
     </div>
@@ -311,15 +309,15 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 <!-- JSZip for DAE+texture bundling -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-<script src="js/coords.js?v=review17"></script>
-<script src="js/cache.js?v=review17"></script>
-<script src="js/terrain.js?v=review17"></script>
-<script src="js/cc0textures.js?v=review17"></script>
-<script src="js/buildings.js?v=review17"></script>
-<script src="js/features.js?v=review17"></script>
-<script src="js/plateau.js?v=review17"></script>
-<script src="js/export.js?v=review17"></script>
-<script src="js/scene.js?v=review17"></script>
-<script src="js/app.js?v=review17"></script>
+<script src="js/coords.js?v=lighting1"></script>
+<script src="js/cache.js?v=lighting1"></script>
+<script src="js/terrain.js?v=lighting1"></script>
+<script src="js/cc0textures.js?v=lighting1"></script>
+<script src="js/buildings.js?v=lighting1"></script>
+<script src="js/features.js?v=lighting1"></script>
+<script src="js/plateau.js?v=lighting1"></script>
+<script src="js/export.js?v=lighting1"></script>
+<script src="js/scene.js?v=lighting1"></script>
+<script src="js/app.js?v=lighting1"></script>
 </body>
 </html>

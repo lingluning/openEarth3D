@@ -383,6 +383,53 @@ function _plateauFlatten(json) {
   return out;
 }
 
+// The 20 designated cities (政令指定都市). Their wards are numbered
+// upward from the city code, so a ward's parent is the largest code in
+// this table that is <= the ward code AND in the same prefecture:
+//   14101 横浜市西区   -> 14100 横浜市
+//   14131 川崎市川崎区 -> 14130 川崎市   (NOT 14100 横浜市)
+//   14151 相模原市緑区 -> 14150 相模原市
+//   27127 大阪市北区   -> 27100 大阪市
+//   27141 堺市堺区     -> 27140 堺市
+//   40101 北九州市門司区 -> 40100 北九州市
+//   40131 福岡市東区   -> 40130 福岡市   (NOT 40100 北九州市)
+const DESIGNATED_CITY_CODES = [
+  '01100', // 札幌市
+  '04100', // 仙台市
+  '11100', // さいたま市
+  '12100', // 千葉市
+  '14100', // 横浜市
+  '14130', // 川崎市
+  '14150', // 相模原市
+  '15100', // 新潟市
+  '22100', // 静岡市
+  '22130', // 浜松市
+  '23100', // 名古屋市
+  '26100', // 京都市
+  '27100', // 大阪市
+  '27140', // 堺市
+  '28100', // 神戸市
+  '33100', // 岡山市
+  '34100', // 広島市
+  '40100', // 北九州市
+  '40130', // 福岡市
+  '43100', // 熊本市
+];
+
+function _designatedCityParent(wardCode) {
+  const pref = String(wardCode).slice(0, 2);
+  const w = parseInt(wardCode, 10);
+  if (!isFinite(w)) return null;
+  let best = null;
+  for (const c of DESIGNATED_CITY_CODES) {
+    if (c.slice(0, 2) !== pref) continue;
+    const n = parseInt(c, 10);
+    if (n <= w && (best === null || n > best)) best = n;
+  }
+  if (best === null || best === w) return null;
+  return String(best).padStart(5, '0');
+}
+
 async function fetchPlateauTilesetUrl(cityCode) {
   if (_PLATEAU_LOOKUP_CACHE[cityCode] !== undefined) return _PLATEAU_LOOKUP_CACHE[cityCode];
   // Distinguish "no cache entry" (getItem → null) from a cached negative
@@ -401,13 +448,17 @@ async function fetchPlateauTilesetUrl(cityCode) {
   try {
     // A ward code may have nothing registered under it: designated-city
     // data (大阪市・横浜市・名古屋市…) is often catalogued under the CITY
-    // code (e.g. 27100) rather than the ward codes (27127…). Try the
-    // ward first, then plausible parent codes.
-    const candidates = [cityCode];
-    if (!/00$/.test(cityCode)) {
-      candidates.push(cityCode.slice(0, 3) + '00');   // 27127 → 27100 (大阪市)
-      candidates.push(cityCode.slice(0, 4) + '0');    // 40131 → 40130 (福岡市)
-    }
+    // code (e.g. 27100) rather than the ward codes (27127…). Try the ward
+    // first, then its parent city.
+    //
+    // Deriving the parent by string surgery was WRONG. `slice(0,3)+'00'`
+    // maps 14131 (川崎市川崎区) to 14100 — which is 横浜市, a different
+    // city — and it was tried FIRST, so Kawasaki silently rendered
+    // Yokohama's buildings. Likewise 相模原 14151→14100, 堺 27141→27100
+    // (大阪市) and 福岡 40131→40100 (北九州市). Resolve against the actual
+    // designated-city code table instead.
+    const candidates = [cityCode, _designatedCityParent(cityCode)]
+      .filter(Boolean);
     let bldg = [];
     for (const code of [...new Set(candidates)]) {
       // Try the current v3 schema first, fall back to the legacy one.
@@ -667,7 +718,10 @@ function _autoTexturePlateau(root, aerialTex, bb, facadePalette, cc0Walls) {
     const safe = SAFE_KEYS.map(k => cc0Walls.get(k)).filter(Boolean);
     const pool = safe.length ? safe : [...cc0Walls.values()];
     wallMats = pool.map((tex, i) => {
-      const mat = new THREE.MeshLambertMaterial({ map: tex });
+      // DoubleSide: PLATEAU LOD2 walls are frequently wound inconsistently
+      // and the source materials we are replacing were often DoubleSide.
+      // Dropping that made whole facades vanish when viewed from one side.
+      const mat = new THREE.MeshLambertMaterial({ map: tex, side: THREE.DoubleSide });
       mat.name = 'plateau_wall_cc0_' + i;
       return mat;
     });
@@ -677,51 +731,70 @@ function _autoTexturePlateau(root, aerialTex, bb, facadePalette, cc0Walls) {
       : [0xeae4d8, 0xe3dcd2, 0xefe8da, 0xe0d8cc];
     wallMats = WALL_TONES.map((tone, i) => {
       const mat = (typeof makeFacadeTexture === 'function')
-        ? new THREE.MeshLambertMaterial({ map: makeFacadeTexture(tone, 'office', i) })
-        : new THREE.MeshLambertMaterial({ color: tone });
+        ? new THREE.MeshLambertMaterial({ map: makeFacadeTexture(tone, 'concrete', i), side: THREE.DoubleSide })
+        : new THREE.MeshLambertMaterial({ color: tone, side: THREE.DoubleSide });
       mat.name = 'plateau_wall_facade_' + i;
       return mat;
     });
   }
 
+  // Wall UV vertical span. The facade texture draws FACADE_ROWS window
+  // rows per repeat, so one repeat must cover that many storeys of real
+  // height. This was hardcoded to 4 m while asking for a 10-row texture —
+  // ten storeys per 4 m, a 40 cm floor-to-floor. Mipmapping averaged the
+  // resulting sub-pixel stripes to flat grey, which is precisely why
+  // PLATEAU towers rendered as featureless colour slabs.
+  const wallVSpan = (typeof facadeRepeatMetres === 'function')
+    ? facadeRepeatMetres('concrete') : 30;
+  const wallUSpan = (typeof FACADE_REPEAT_WIDTH_M === 'number')
+    ? FACADE_REPEAT_WIDTH_M : 8;
+
+  // Accumulate ALL triangles into one bucket per material rather than
+  // emitting two meshes per source mesh. A dense ward is hundreds of
+  // b3dm meshes; the old code turned that into hundreds of extra draw
+  // calls (and hundreds of BufferGeometries) for no benefit. Now the
+  // whole auto-textured city is 1 roof mesh + one mesh per wall tone.
+  const roofBuf = { pos: [], uv: [] };
+  const wallBufs = wallMats.map(() => ({ pos: [], uv: [] }));
+
   const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
   const ab = new THREE.Vector3(), ac = new THREE.Vector3(), nrm = new THREE.Vector3();
-  const buildMesh = (positions, uvs, mat) => {
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    g.setAttribute('uv',       new THREE.Float32BufferAttribute(uvs, 2));
-    g.computeVertexNormals();
-    return new THREE.Mesh(g, mat);
-  };
 
   let mi = 0;
   for (const mesh of targets) {
     const src = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry;
     const pos = src.attributes.position;
     const mw = mesh.matrixWorld;
-    const roofPos = [], roofUV = [], wallPos = [], wallUV = [];
+    const wallBuf = wallBufs[mi % wallBufs.length];
     for (let t = 0; t + 2 < pos.count; t += 3) {
       va.fromBufferAttribute(pos, t).applyMatrix4(mw);
       vb.fromBufferAttribute(pos, t + 1).applyMatrix4(mw);
       vc.fromBufferAttribute(pos, t + 2).applyMatrix4(mw);
       nrm.crossVectors(ab.subVectors(vb, va), ac.subVectors(vc, va)).normalize();
-      if (nrm.y > 0.5) {
+      // |ny| — a DOWN-facing horizontal face (soffit, underside of an
+      // overhang, an inverted-winding roof) is still a horizontal surface.
+      // Testing only ny > 0.5 sent those to the wall path, where a
+      // vertical-run UV smears one texel across the whole face.
+      if (Math.abs(nrm.y) > 0.5) {
         for (const v of [va, vb, vc]) {
-          roofPos.push(v.x, v.y, v.z);
-          roofUV.push(v.x / xSize, 1 - v.z / zSize);
+          roofBuf.pos.push(v.x, v.y, v.z);
+          // Clamp into [0,1]: the aerial CanvasTexture uses ClampToEdge,
+          // so a roof sitting outside the mapped area sampled a single
+          // edge texel and painted the whole building one flat colour.
+          roofBuf.uv.push(
+            Math.min(1, Math.max(0, v.x / xSize)),
+            Math.min(1, Math.max(0, 1 - v.z / zSize)));
         }
       } else {
         // Pick the horizontal run direction per face so window columns
         // stay vertical: a wall facing ±Z runs along X and vice versa.
         const runAlongX = Math.abs(nrm.x) <= Math.abs(nrm.z);
         for (const v of [va, vb, vc]) {
-          wallPos.push(v.x, v.y, v.z);
-          wallUV.push((runAlongX ? v.x : v.z) / 8, v.y / 4);
+          wallBuf.pos.push(v.x, v.y, v.z);
+          wallBuf.uv.push((runAlongX ? v.x : v.z) / wallUSpan, v.y / wallVSpan);
         }
       }
     }
-    if (roofPos.length) root.add(buildMesh(roofPos, roofUV, roofMat));
-    if (wallPos.length) root.add(buildMesh(wallPos, wallUV, wallMats[mi % wallMats.length]));
     mi++;
     if (mesh.parent) mesh.parent.remove(mesh);
     if (src !== mesh.geometry) src.dispose();
@@ -729,7 +802,25 @@ function _autoTexturePlateau(root, aerialTex, bb, facadePalette, cc0Walls) {
     const oldMats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     for (const m of oldMats) m && m.dispose();
   }
-  console.log(`[PLATEAU] auto-textured ${targets.length} white mesh(es): aerial roofs + procedural facades`);
+
+  const emit = (buf, mat, name) => {
+    if (!buf.pos.length) return 0;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(buf.pos, 3));
+    g.setAttribute('uv',       new THREE.Float32BufferAttribute(buf.uv, 2));
+    g.computeVertexNormals();
+    const m = new THREE.Mesh(g, mat);
+    m.name = name;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    root.add(m);
+    return 1;
+  };
+  let emitted = emit(roofBuf, roofMat, 'plateau-roofs-aerial');
+  wallBufs.forEach((b, i) => { emitted += emit(b, wallMats[i], 'plateau-walls-' + i); });
+  console.log(`[PLATEAU] auto-textured ${targets.length} white mesh(es) ` +
+    `-> ${emitted} merged mesh(es): aerial roofs + procedural facades ` +
+    `(wall repeat ${wallUSpan}m x ${wallVSpan}m)`);
 }
 
 // ── Tile loader ────────────────────────────────────────────────────────
@@ -991,6 +1082,11 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress, opts) {
           return phong;
         });
         o.material = Array.isArray(o.material) ? next : next[0];
+        // Photo-textured PLATEAU tiles keep their own geometry, so they
+        // need the shadow flags set here (the auto-texture path sets them
+        // on its merged meshes instead).
+        o.castShadow = true;
+        o.receiveShadow = true;
       });
       // First few tiles report their texture density so the user can
       // tell from console whether textures actually exist on disk vs.
