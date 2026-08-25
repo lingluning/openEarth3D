@@ -281,7 +281,9 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
     <div class="hint">
       左ドラッグ: 回転 &nbsp;|&nbsp; 右ドラッグ/中ドラッグ: 移動<br>
       スクロール: ズーム &nbsp;|&nbsp; 建物クリック: 情報表示<br>
-      データ: 国土地理院・OpenStreetMap
+      データ: 国土地理院 / OpenStreetMap contributors / PLATEAU (国土交通省)<br>
+      航空写真: ESRI World Imagery, Microsoft Bing Maps, USGS, Sentinel-2 cloudless<br>
+      テクスチャ: PolyHaven (CC0)
     </div>
     <div id="buildingInfo" style="display:none;position:absolute;top:14px;right:14px;background:rgba(16,24,50,0.94);border:1px solid #4fc3f7;border-radius:8px;padding:10px 14px;color:#e0e0f0;font-size:0.8rem;line-height:1.6;max-width:220px;z-index:998;cursor:pointer;backdrop-filter:blur(8px)"></div>
   </div>
@@ -292,13 +294,11 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/objects/Sky.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/Pass.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/MaskPass.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/ColladaExporter.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/OBJExporter.js"></script>
@@ -309,15 +309,15 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 <!-- JSZip for DAE+texture bundling -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-<script src="js/coords.js?v=lighting3"></script>
-<script src="js/cache.js?v=lighting3"></script>
-<script src="js/terrain.js?v=lighting3"></script>
-<script src="js/cc0textures.js?v=lighting3"></script>
-<script src="js/buildings.js?v=lighting3"></script>
-<script src="js/features.js?v=lighting3"></script>
-<script src="js/plateau.js?v=lighting3"></script>
-<script src="js/export.js?v=lighting3"></script>
-<script src="js/scene.js?v=lighting3"></script>
-<script src="js/app.js?v=lighting3"></script>
+<script src="js/coords.js?v=lighting4"></script>
+<script src="js/cache.js?v=lighting4"></script>
+<script src="js/terrain.js?v=lighting4"></script>
+<script src="js/cc0textures.js?v=lighting4"></script>
+<script src="js/buildings.js?v=lighting4"></script>
+<script src="js/features.js?v=lighting4"></script>
+<script src="js/plateau.js?v=lighting4"></script>
+<script src="js/export.js?v=lighting4"></script>
+<script src="js/scene.js?v=lighting4"></script>
+<script src="js/app.js?v=lighting4"></script>
 </body>
 </html>

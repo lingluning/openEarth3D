@@ -196,31 +196,26 @@ async function exportSceneAsObj(terrain, buildings, baseName, features) {
     return n;
   });
 
-  let objText = new THREE.OBJExporter().parse(root);
-  // OBJExporter only writes o/v/vt/vn/f records — without usemtl lines the
-  // .mtl we generate (and its textures) is never applied by any importer
-  // and the model comes in untextured grey. It emits one "o <name>" block
-  // per mesh in root.traverse order, the same order we collected materials
-  // in, so pair them up and inject `usemtl` after each "o" line. (Material
-  // ARRAYS can't be represented — OBJExporter ignores geometry groups — so
-  // emit the first entry; the dominant texture survives.)
-  const meshMatSeq = [];
-  root.traverse(obj => {
-    if (obj.isMesh) {
-      const m = Array.isArray(obj.material) ? obj.material[0] : obj.material;
-      meshMatSeq.push(m && matIds.has(m) ? matNames[matIds.get(m)] : null);
-    } else if (obj.isLine || obj.isPoints) {
-      meshMatSeq.push(null);   // exporter writes an "o" block for these too
-    }
-  });
-  let oIdx = 0;
-  objText = objText.split('\n').map(line => {
-    if (line.startsWith('o ') || line === 'o') {
-      const matName = meshMatSeq[oIdx++];
-      if (matName) return line + '\nusemtl ' + matName;
-    }
-    return line;
-  }).join('\n');
+  // r0.128's OBJExporter DOES emit `usemtl <material.name>` per mesh — it
+  // just uses the raw name. That name is frequently a DUPLICATE (every
+  // PLATEAU tile calls its materials 'plateau') and may contain characters
+  // MTL cannot express, so it referenced entries that do not exist in the
+  // de-duplicated .mtl we write and importers fell back to untextured grey.
+  //
+  // A previous attempt injected a second `usemtl` after each `o` line; the
+  // exporter's own line appears later in the block and simply overrode it.
+  // The fix is to make the exporter emit the RIGHT names: rename the
+  // materials to their unique .mtl names for the duration of the export,
+  // then restore. (Object3D.clone() shares materials by reference, so
+  // these are the live scene's materials — restoring is not optional.)
+  const originalNames = materials.map(m => m.name);
+  materials.forEach((m, i) => { m.name = matNames[i]; });
+  let objText;
+  try {
+    objText = new THREE.OBJExporter().parse(root);
+  } finally {
+    materials.forEach((m, i) => { m.name = originalNames[i]; });
+  }
   objText = `mtllib ${baseName}.mtl\n` + objText;
 
   // Render each unique texture into a PNG via an offscreen canvas.

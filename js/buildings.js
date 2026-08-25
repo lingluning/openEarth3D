@@ -33,8 +33,16 @@ async function _overpassJson(query) {
   let lastErr = null;
   // Try every mirror once, starting from wherever the previous successful
   // call left off (mild round-robin so we spread load across servers).
+  // Claim a starting mirror IMMEDIATELY. app.js fires the buildings query
+  // and the ground-features query in parallel; because _overpassMirrorIdx
+  // was only advanced on SUCCESS, both requests read the same index and
+  // hammered the same server simultaneously — reliably self-inflicting the
+  // 429s the mirror rotation exists to avoid. Reserving the slot up front
+  // means concurrent callers start on different mirrors.
+  const startIdx = _overpassMirrorIdx;
+  _overpassMirrorIdx = (_overpassMirrorIdx + 1) % OVERPASS_MIRRORS.length;
   for (let attempt = 0; attempt < OVERPASS_MIRRORS.length; attempt++) {
-    const url = OVERPASS_MIRRORS[(_overpassMirrorIdx + attempt) % OVERPASS_MIRRORS.length];
+    const url = OVERPASS_MIRRORS[(startIdx + attempt) % OVERPASS_MIRRORS.length];
     try {
       const res = await fetch(url, { method: 'POST', body });
       const ct = res.headers.get('content-type') || '';
@@ -54,7 +62,8 @@ async function _overpassJson(query) {
         continue;
       }
       const json = await res.json();
-      _overpassMirrorIdx = (_overpassMirrorIdx + attempt) % OVERPASS_MIRRORS.length;
+      // Next caller should start after the mirror that just worked.
+      _overpassMirrorIdx = (startIdx + attempt + 1) % OVERPASS_MIRRORS.length;
       return json.elements || [];
     } catch (e) {
       if (e && e.fatal) throw e;
@@ -772,6 +781,12 @@ function makeRoofTexture(baseHex, pitched) {
   const bg = (baseHex >> 8) & 0xff;
   const bb = baseHex & 0xff;
   const baseRGB = (k=1) => `rgb(${(br*k)|0},${(bg*k)|0},${(bb*k)|0})`;
+  // Seeded, not Math.random(): the roof pattern is part of the rendered
+  // image, so an unseeded generator makes two loads of the same share URL
+  // produce visibly different roofs — the link stops reproducing the view
+  // it promised, and screenshots are not repeatable either. Everything
+  // that feeds the pixels must derive from the same key as the cache.
+  const rng = _seededRng(((baseHex << 3) ^ (pitched ? 0x5bf03 : 0x1d7a9)) >>> 0);
 
   if (pitched) {
     // Mortar / shadow background — kept a bit darker than the base, but
@@ -790,7 +805,7 @@ function makeRoofTexture(baseHex, pitched) {
         const x = col * tileW + offX;
         // 0.90 .. 1.30 around base — guarantees tiles are at least as
         // bright as the base colour even after random variation.
-        const v = 0.90 + Math.random() * 0.40;
+        const v = 0.90 + rng() * 0.40;
         // Tile body: rounded "shield" top + rectangle base.
         ctx.fillStyle = baseRGB(v);
         ctx.beginPath();
@@ -801,7 +816,7 @@ function makeRoofTexture(baseHex, pitched) {
         ctx.closePath();
         ctx.fill();
         // Top highlight.
-        ctx.strokeStyle = `rgba(255,255,255,${0.10 + Math.random() * 0.08})`;
+        ctx.strokeStyle = `rgba(255,255,255,${0.10 + rng() * 0.08})`;
         ctx.lineWidth = 1.2;
         ctx.beginPath();
         ctx.arc(x + tileW * 0.5, y + tileH * 0.55, tileW * 0.5 - 0.8, Math.PI, 0, false);
@@ -823,7 +838,7 @@ function makeRoofTexture(baseHex, pitched) {
     ctx.fillRect(0, 0, W, H);
     const img = ctx.getImageData(0, 0, W, H);
     for (let i = 0; i < img.data.length; i += 4) {
-      const n = (Math.random() - 0.5) * 22;
+      const n = (rng() - 0.5) * 22;
       img.data[i]   = Math.max(0, Math.min(255, img.data[i]   + n));
       img.data[i+1] = Math.max(0, Math.min(255, img.data[i+1] + n));
       img.data[i+2] = Math.max(0, Math.min(255, img.data[i+2] + n));
