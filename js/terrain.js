@@ -619,55 +619,60 @@ async function fetchAerialPhoto(bb, requestedZoom, onProgress, opts) {
   const tyMin = Math.min(nw.y, se.y), tyMax = Math.max(nw.y, se.y);
   const cols = txMax - txMin + 1, rows = tyMax - tyMin + 1, tot = cols * rows;
 
-  const cvs = document.createElement('canvas');
-  cvs.width = cols * 256; cvs.height = rows * 256;
-  const ctx = cvs.getContext('2d');
-  // Pre-fill: failed tiles (coverage edges — the picker only probes the
-  // CENTRE tile) leave transparent canvas, which an opaque material
-  // renders as solid black. Neutral grey-green reads as "no data".
-  ctx.fillStyle = '#9aa39a';
-  ctx.fillRect(0, 0, cvs.width, cvs.height);
-
-  // Parallel download + decode, then composite onto the working canvas.
-  const coords = [];
-  for (let ty = tyMin; ty <= tyMax; ty++)
-    for (let tx = txMin; tx <= txMax; tx++)
-      coords.push({ tx, ty });
-  let done = 0;
-  await mapWithConcurrency(coords, 6, async ({ tx, ty }) => {
-    const img = await loadTileImg(src.url(effectiveZoom, tx, ty));
-    if (img) {
-      try { ctx.drawImage(img, (tx - txMin) * 256, (ty - tyMin) * 256, 256, 256); } catch {}
-      img.close && img.close();
-    }
-    done++;
-    onProgress && onProgress(done / tot, `航空写真 ${src.name} z${effectiveZoom}: ${done}/${tot}`);
-  });
-
+  // Crop rectangle in full-resolution tile-pixel space.
   const bx = txMin * 256, by = tyMin * 256;
   const xMin = lonToWorldPx(bb.w, effectiveZoom) - bx, xMax = lonToWorldPx(bb.e, effectiveZoom) - bx;
   const yMin = latToWorldPy(bb.n, effectiveZoom) - by, yMax = latToWorldPy(bb.s, effectiveZoom) - by;
-  const cx = Math.max(0, Math.round(xMin)), cy = Math.max(0, Math.round(yMin));
-  const cw = Math.min(cvs.width - cx, Math.round(xMax - xMin));
-  const ch = Math.min(cvs.height - cy, Math.round(yMax - yMin));
+  const cw = Math.max(1, xMax - xMin), ch = Math.max(1, yMax - yMin);
 
   // Texture-edge cap. 4096 used to be the safe number; modern desktops
   // and most phones now handle 8192 fine and 16384 on dedicated GPUs.
   // Caller can override via opts.maxTextureEdge.
   const MAX_EDGE = (o && o.maxTextureEdge) || 8192;
-  const out = document.createElement('canvas');
   // Cap on the long edge with a single uniform scale; clamping width
   // and height independently would squash the photo non-uniformly and
   // the texture would stop lining up with OSM building positions.
   const scale = Math.min(1, MAX_EDGE / Math.max(cw, ch));
+
+  // Composite DIRECTLY at output scale. The previous version built a
+  // full-resolution mosaic of every tile first and then downscaled it in
+  // one go: for a 3 km request at a high zoom that intermediate is tens of
+  // thousands of pixels on a side — hundreds of megabytes, and past the
+  // browser's maximum canvas area it silently yields a BLANK canvas, i.e.
+  // a black map. Drawing each tile straight into its place in the final
+  // canvas removes the intermediate entirely, so peak memory is just the
+  // output texture and the size cap can never be exceeded.
+  const out = document.createElement('canvas');
   out.width  = Math.max(1, Math.round(cw * scale));
   out.height = Math.max(1, Math.round(ch * scale));
-  // Smooth resampling — the default low-quality nearest mode visibly
-  // blurs at higher cap sizes when downscaling is needed.
   const outCtx = out.getContext('2d');
   outCtx.imageSmoothingEnabled = true;
   outCtx.imageSmoothingQuality = 'high';
-  outCtx.drawImage(cvs, cx, cy, cw, ch, 0, 0, out.width, out.height);
+  // Pre-fill: failed tiles (coverage edges — the picker only probes the
+  // CENTRE tile) leave transparent canvas, which an opaque material
+  // renders as solid black. Neutral grey-green reads as "no data".
+  outCtx.fillStyle = '#9aa39a';
+  outCtx.fillRect(0, 0, out.width, out.height);
+
+  const coords = [];
+  for (let ty = tyMin; ty <= tyMax; ty++)
+    for (let tx = txMin; tx <= txMax; tx++)
+      coords.push({ tx, ty });
+  let done = 0;
+  const tileDst = 256 * scale;
+  await mapWithConcurrency(coords, 6, async ({ tx, ty }) => {
+    const img = await loadTileImg(src.url(effectiveZoom, tx, ty));
+    if (img) {
+      // Float destination coordinates — rounding each tile independently
+      // would open hairline seams between neighbours.
+      const dx = ((tx - txMin) * 256 - xMin) * scale;
+      const dy = ((ty - tyMin) * 256 - yMin) * scale;
+      try { outCtx.drawImage(img, dx, dy, tileDst, tileDst); } catch {}
+      img.close && img.close();
+    }
+    done++;
+    onProgress && onProgress(done / tot, `航空写真 ${src.name} z${effectiveZoom}: ${done}/${tot}`);
+  });
 
   // Skip the JPEG roundtrip — round-tripping through toDataURL('image/jpeg', 0.95)
   // re-encodes to lossy JPEG then re-decodes via TextureLoader, introducing

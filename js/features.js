@@ -231,7 +231,13 @@ function _buildRailLine(coords, off, bb, elevGrid, gridN, vertExag) {
   return geo;
 }
 
-// ── Road geometry — flat ribbons hovering 0.5 m above the terrain ─────────
+// ── Road geometry — flat ribbons hugging the terrain ─────────────────────
+// Roads used to be lifted a flat 0.5 m so they would not z-fight with the
+// ground. At street level that reads as a visible plinth — the road floats
+// on a kerb-height podium and every driveway meets thin air. Use a small
+// lift plus polygonOffset instead: the depth bias resolves the z-fight in
+// the depth buffer without moving the geometry anywhere the eye can see
+// it.
 function _toLocal(c, bb) { return { x: toLocalX(c.lon, bb), z: toLocalZ(c.lat, bb) }; }
 
 function _buildRoadRibbon(coords, width, bb, elevGrid, gridN, vertExag) {
@@ -240,10 +246,31 @@ function _buildRoadRibbon(coords, width, bb, elevGrid, gridN, vertExag) {
   // makes the bisector calc go undefined and produces visible spikes /
   // gaps in the ribbon.
   const raw = coords.map(c => _toLocal(c, bb));
-  const pts = raw.length ? [raw[0]] : [];
+  const dedup = raw.length ? [raw[0]] : [];
   for (let i = 1; i < raw.length; i++) {
-    const last = pts[pts.length - 1];
-    if (Math.hypot(raw[i].x - last.x, raw[i].z - last.z) > 0.1) pts.push(raw[i]);
+    const last = dedup[dedup.length - 1];
+    if (Math.hypot(raw[i].x - last.x, raw[i].z - last.z) > 0.1) dedup.push(raw[i]);
+  }
+  // Resample long spans. The ribbon takes its height from the terrain at
+  // each vertex, and OSM only puts a node where the road CHANGES DIRECTION
+  // — a straight road over a hill can run hundreds of metres between
+  // nodes, so the ribbon cuts a chord straight through the hilltop and out
+  // the other side. Inserting intermediate vertices every ~12 m lets the
+  // road follow the ground, and is also what makes a small vertical lift
+  // sufficient to avoid z-fighting.
+  const STEP = 12;
+  const pts = [];
+  for (let i = 0; i < dedup.length; i++) {
+    pts.push(dedup[i]);
+    const b = dedup[i + 1];
+    if (!b) break;
+    const a = dedup[i];
+    const len = Math.hypot(b.x - a.x, b.z - a.z);
+    const n = Math.floor(len / STEP);
+    for (let k = 1; k <= n; k++) {
+      const t = k / (n + 1);
+      pts.push({ x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t });
+    }
   }
   const n = pts.length;
   if (n < 2) {
@@ -255,7 +282,7 @@ function _buildRoadRibbon(coords, width, bb, elevGrid, gridN, vertExag) {
 
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
   const half = width / 2;
-  const LIFT = 0.5;
+  const LIFT = 0.12;   // resampled vertices track the ground; polygonOffset does the rest
   // Miter length cap — beyond this multiplier of half-width the corner
   // would spike off into the distance on near-180° hairpin turns.
   const MITER_LIMIT = 4.0;
@@ -372,7 +399,10 @@ function createRoads(roads, bb, elevGrid, gridN, vertExag) {
     const mat = new THREE.MeshLambertMaterial({
       color: parseInt(col, 10),
       polygonOffset: true,
-      polygonOffsetFactor: -1,
+      // Stronger bias now that the ribbon sits 0.12 m above ground instead
+      // of 0.5 m: the depth buffer, not the geometry, keeps roads on top.
+      polygonOffsetFactor: -4,
+      polygonOffsetUnits: -4,
     });
     mat.name = `road_${parseInt(col, 10).toString(16)}`;
     const mesh = new THREE.Mesh(merged, mat);
@@ -529,10 +559,19 @@ function createWater(waters, bb, elevGrid, gridN, vertExag) {
   const group = new THREE.Group();
   group.name = 'water';
   const xSize = bboxXSize(bb), zSize = bboxZSize(bb);
-  const mat = new THREE.MeshLambertMaterial({
-    color: 0x7eb4d4,            // lighter blue, illustration-friendly
+  // Water was a flat opaque Lambert polygon — with no specular response it
+  // read as painted blue paper and was the most obviously fake surface in
+  // the scene. Phong gives it a real sun glint, which is most of what
+  // makes a viewer accept a surface as water; a tight, bright highlight
+  // plus a slightly deeper base colour does the rest. It also picks up the
+  // sky's hemisphere colour, so it now changes with the time of day.
+  const mat = new THREE.MeshPhongMaterial({
+    color: 0x4a86ad,
+    specular: 0xbfe6ff,
+    shininess: 120,
+    reflectivity: 0.6,
     transparent: true,
-    opacity: 0.85,
+    opacity: 0.88,
     side: THREE.DoubleSide,
   });
   mat.name = 'water';
@@ -617,17 +656,54 @@ function createTrees(treePoints, forests, bb, elevGrid, gridN, vertExag) {
   const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6e4e30 });
   trunkMat.name = 'tree_trunk';
 
-  // Deciduous: rounded icosahedron crown sitting on the trunk top.
+  // Crowns. Smooth-shaded primitives read as plastic golf balls at any
+  // distance — real foliage reads as CLUMPS with light on top and shadow
+  // underneath. Two things fix that cheaply:
+  //  1. flat shading, so each facet catches the sun differently and the
+  //     crown breaks into leaf-mass sized planes instead of a smooth ball;
+  //  2. per-vertex colour ramping from a dark underside to a bright,
+  //     slightly yellow top, which fakes the self-shadowing that makes a
+  //     canopy legible from above (the view this app is mostly used in).
+  const _crownTint = (geo, lo, hi) => {
+    const pos = geo.attributes.position;
+    let minY = Infinity, maxY = -Infinity;
+    for (let i = 0; i < pos.count; i++) {
+      const y = pos.getY(i);
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+    const span = Math.max(1e-6, maxY - minY);
+    const col = new Float32Array(pos.count * 3);
+    const c = new THREE.Color();
+    for (let i = 0; i < pos.count; i++) {
+      const t = (pos.getY(i) - minY) / span;
+      c.setHex(lo).lerp(new THREE.Color(hi), t * t);
+      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    return geo;
+  };
+
+  // Deciduous: irregular clumped crown. Detail 1 gives 80 facets — enough
+  // to read as foliage, cheap enough for thousands of instances.
   const decidGeo = new THREE.IcosahedronGeometry(2.4, 1);
-  decidGeo.scale(1, 1.15, 1);          // slightly egg-shaped
+  decidGeo.scale(1.05, 1.15, 0.95);     // asymmetric so it is not a ball
   decidGeo.translate(0, 2.5 + 2.4, 0);
+  _crownTint(decidGeo, 0x2f5a2a, 0x8cc45a);
   // Coniferous: tall cone.
   const coniGeo = new THREE.ConeGeometry(2.0, 6.0, 8);
   coniGeo.translate(0, 2.5 + 3.0, 0);
+  _crownTint(coniGeo, 0x1f4429, 0x63a355);
 
-  const decidMat = new THREE.MeshLambertMaterial({ color: 0x5a9a48 });
+  // MeshLambertMaterial is a Gouraud material and has NO flatShading
+  // property — passing one is silently dropped, which is how the crowns
+  // stayed smooth golf balls. Phong with shininess 0 shades identically to
+  // Lambert (pure diffuse, no highlight) but does honour flatShading.
+  const decidMat = new THREE.MeshPhongMaterial({
+    vertexColors: true, flatShading: true, shininess: 0, specular: 0x000000 });
   decidMat.name = 'tree_crown_deciduous';
-  const coniMat = new THREE.MeshLambertMaterial({ color: 0x3f7a44 });
+  const coniMat = new THREE.MeshPhongMaterial({
+    vertexColors: true, flatShading: true, shininess: 0, specular: 0x000000 });
   coniMat.name = 'tree_crown_conifer';
 
   const nConifer = inside.reduce((s, t) => s + (t.conifer ? 1 : 0), 0);
