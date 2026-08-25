@@ -497,6 +497,7 @@ async function run() {
   clearSceneObjects();
   currentTerrain = buildTerrain(elevGrid, meshN, xSize, zSize, aerialTex, vertExag);
   scene.add(currentTerrain);
+  if (typeof requestRender === "function") requestRender();
   placeCameraOverTerrain(elevGrid, meshN, xSize, zSize, vertExag);
   // Size the sun's orthographic shadow frustum to this scene. Headroom
   // above the highest terrain point covers towers we haven't built yet.
@@ -588,6 +589,7 @@ async function run() {
       featGroup.add(createBridges(feats.bridges, bb, elevGrid, meshN, vertExag));
       featGroup.add(createTrees(feats.trees, feats.forests, bb, elevGrid, meshN, vertExag));
       scene.add(featGroup);
+      if (typeof requestRender === "function") requestRender();
       currentFeatures = featGroup;   // for export
 
       // PLATEAU path
@@ -717,6 +719,7 @@ async function run() {
                 `(median over ${deltas.length} bins, ${sampled} verts)`);
             }
             scene.add(plateauGroup);
+            if (typeof requestRender === "function") requestRender();
             currentBuildings = plateauGroup;
             usedPlateau = true;
             setProgress(0.96, `✨ PLATEAU ${lodLabel} ${cityNames} で表示中`);
@@ -734,6 +737,7 @@ async function run() {
         currentBuildingData = parsed;   // for click-to-inspect
         currentBB = bb;
         scene.add(currentBuildings);
+        if (typeof requestRender === "function") requestRender();
         const failNote = (bRes.status === 'rejected' || gRes.status === 'rejected')
           ? ' ⚠️ 一部のOSMデータ取得失敗' : '';
         const plateauNote = !usePlateau ? ''
@@ -764,6 +768,7 @@ async function run() {
     // the session with no way back short of a page reload — and after a
     // partial failure there is usually still a scene worth exporting.
     setExportEnabled(!!currentTerrain);
+    if (typeof requestRender === 'function') requestRender();
   }
 }
 

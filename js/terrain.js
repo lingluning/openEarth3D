@@ -143,8 +143,47 @@ function sampleMosaicCubic(arr, W, H, fx, fy) {
 async function fetchDemTileCascade(z, tx, ty) {
   const gsi = await fetchDemTile(z, tx, ty);
   if (gsi) return gsi;
-  // GSI returned null (404 or outside coverage) → fall back to global Terrarium
+  // GSI publishes dem5a (5 m) ONLY at z15 and dem (10 m) ONLY up to z14.
+  // fetchDemTile tries both at the SAME zoom, so at z15 the 10 m layer can
+  // never respond — every part of Japan outside dem5a's narrower coverage
+  // (outer islands, various inland areas) skipped straight past 10 m data
+  // to 30 m global Terrarium. Reach the 10 m layer by fetching the parent
+  // z14 tile and upsampling our quadrant of it.
+  if (z === 15) {
+    const parent = await fetchGsiDemAt(14, tx >> 1, ty >> 1, 'dem_png');
+    if (parent) return _upsampleQuadrant(parent, tx & 1, ty & 1);
+  }
   return await fetchTerrariumTile(z, tx, ty);
+}
+
+// One named GSI DEM layer at an explicit zoom (the cascade needs to mix
+// zooms; fetchDemTile is locked to a single one).
+async function fetchGsiDemAt(z, tx, ty, layer) {
+  try {
+    const res = await cachedFetch(`https://cyberjapandata.gsi.go.jp/xyz/${layer}/${z}/${tx}/${ty}.png`);
+    if (!res.ok) return null;
+    return await decodeDemBlob(await res.blob(), decodeGsi);
+  } catch { return null; }
+}
+
+// Bilinearly blow up one 128x128 quadrant of a 256x256 parent tile back to
+// 256x256, so a z14 tile can stand in for one of its four z15 children.
+function _upsampleQuadrant(parent, qx, qy) {
+  const out = new Float32Array(256 * 256);
+  const ox = qx * 128, oy = qy * 128;
+  for (let y = 0; y < 256; y++) {
+    const sy = oy + y / 2;
+    const y0 = Math.floor(sy), y1 = Math.min(255, y0 + 1), fy = sy - y0;
+    for (let x = 0; x < 256; x++) {
+      const sx = ox + x / 2;
+      const x0 = Math.floor(sx), x1 = Math.min(255, x0 + 1), fx = sx - x0;
+      const a = parent[y0 * 256 + x0], b = parent[y0 * 256 + x1];
+      const c = parent[y1 * 256 + x0], d = parent[y1 * 256 + x1];
+      out[y * 256 + x] = (a * (1 - fx) + b * fx) * (1 - fy)
+                       + (c * (1 - fx) + d * fx) * fy;
+    }
+  }
+  return out;
 }
 
 // Pick the DEM XYZ zoom that gives roughly one DEM pixel per output grid

@@ -198,6 +198,7 @@ function setTimeOfDay(hour) {
   }
   // Exposure lifts at night so the scene doesn't go to mud.
   if (renderer) renderer.toneMappingExposure = 1.15 + 0.35 * (1 - dayness);
+  requestRender();
 }
 
 // Final grade + vignette. ACES already shaped the tonal response in the
@@ -290,15 +291,31 @@ function onResize() {
   if (composer) composer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  requestRender();
 }
+
+// The scene is static unless the user is interacting: no animation, no
+// physics, nothing moves. Re-rendering an unchanged image 60 times a
+// second just burns GPU and battery — noticeably so on a laptop and
+// severely on a phone. Render on demand instead: whenever the camera
+// moves, the window resizes, or anything mutates the scene.
+let _needsRender = true;
+function requestRender() { _needsRender = true; }
 
 function startLoop() {
   if (animId != null) cancelAnimationFrame(animId);
+  controls.addEventListener('change', requestRender);
   (function loop() {
     animId = requestAnimationFrame(loop);
-    controls.update();
-    if (composer) composer.render();
-    else renderer.render(scene, camera);
+    // OrbitControls damping keeps easing the camera for a while after the
+    // pointer is released, and update() returns true while it is still
+    // moving — so keep drawing until it settles.
+    const moving = controls.update();
+    if (moving || _needsRender) {
+      _needsRender = false;
+      if (composer) composer.render();
+      else renderer.render(scene, camera);
+    }
   })();
 }
 
@@ -334,6 +351,7 @@ function clearSceneObjects() {
     }
   });
   if (typeof resetBuildingCaches === 'function') resetBuildingCaches();
+  requestRender();
 }
 
 // Build a terrain LOD with 4 vertex-density levels (see commit d08cde4).
@@ -459,4 +477,5 @@ function placeCameraOverTerrain(grid, n, xSize, zSize, vertExag) {
   );
   controls.target.set(cx, midElev + 10, cz);
   controls.update();
+  requestRender();
 }

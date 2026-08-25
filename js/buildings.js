@@ -205,9 +205,22 @@ function parseBuildings(elements, bb) {
   const wayMap = {};
   elements.filter(e => e.type === 'way').forEach(w => { wayMap[w.id] = w; });
 
-  const coordsOf = way => way.nodes
-    .map(id => nodeMap[id]).filter(Boolean)
-    .map(n => ({ lat: n.lat, lon: n.lon }));
+  // OSM closed ways repeat their first node as the last one. Carrying that
+  // duplicate through means the first vertex is counted TWICE in every
+  // centroid average — which is what positions pitched-roof apexes, roof
+  // equipment and the elevation sample — and it feeds a zero-length edge
+  // into the convexity test. Strip it once, here.
+  const coordsOf = way => {
+    const c = way.nodes
+      .map(id => nodeMap[id]).filter(Boolean)
+      .map(n => ({ lat: n.lat, lon: n.lon }));
+    while (c.length > 2 &&
+           Math.abs(c[0].lat - c[c.length - 1].lat) < 1e-9 &&
+           Math.abs(c[0].lon - c[c.length - 1].lon) < 1e-9) {
+      c.pop();
+    }
+    return c;
+  };
 
   // Resolve the geometry way for an element: the way itself, or the outer
   // ring of a type=multipolygon relation (donut buildings / stations).
@@ -903,7 +916,8 @@ function _getWallMat(style, bucket = 0) {
   if (_cc0Walls && _cc0Walls.has(style.type)) {
     const ckey = `cc0_${style.type}`;
     if (_matCache.wall[ckey]) return _matCache.wall[ckey];
-    const mat = new THREE.MeshLambertMaterial({ map: _cc0Walls.get(style.type) });
+    const mat = new THREE.MeshLambertMaterial({
+      map: _cc0Walls.get(style.type), vertexColors: true });
     mat.name = `wall_${ckey}`;
     _matCache.wall[ckey] = mat;
     return mat;
@@ -911,9 +925,8 @@ function _getWallMat(style, bucket = 0) {
   const key = `${wallHex.toString(16)}_${style.type}_${bucket}`;
   if (_matCache.wall[key]) return _matCache.wall[key];
   const tex = makeFacadeTexture(wallHex, style.type, bucket);
-  // Cartoon style: Lambert reads the hemi gradient but has no specular
-  // or env reflections.
-  const mat = new THREE.MeshLambertMaterial({ map: tex });
+  // vertexColors carries the baked ground-contact AO from _makeWallsGeo.
+  const mat = new THREE.MeshLambertMaterial({ map: tex, vertexColors: true });
   mat.name = `wall_${key}`;
   _matCache.wall[key] = mat;
   return mat;
@@ -924,7 +937,7 @@ function _getShopfrontMat(style, bucket = 0) {
   const key = `shop_${wallHex.toString(16)}_${bucket}`;
   if (_matCache.wall[key]) return _matCache.wall[key];
   const tex = makeShopfrontTexture(wallHex, bucket);
-  const mat = new THREE.MeshLambertMaterial({ map: tex });
+  const mat = new THREE.MeshLambertMaterial({ map: tex, vertexColors: true });
   mat.name = key;
   _matCache.wall[key] = mat;
   return mat;
@@ -938,7 +951,8 @@ function _getParapetMat(style, bucket = 0) {
   const hex = _jitterHexHSL(style.roof, off.dh * 0.4, off.ds * 0.4, off.dl * 0.4 + 0.06);
   const key = `parapet_${hex.toString(16)}`;
   if (_matCache.roof[key]) return _matCache.roof[key];
-  const mat = new THREE.MeshLambertMaterial({ color: hex, side: THREE.DoubleSide });
+  const mat = new THREE.MeshLambertMaterial({
+    color: hex, side: THREE.DoubleSide, vertexColors: true });
   mat.name = key;
   _matCache.roof[key] = mat;
   return mat;
@@ -973,22 +987,50 @@ function _getRoofMat(style, pitched, bucket = 0) {
 // (b-a) × (top-bot)). We emit triangles in (a-bot, b-top, b-bot) /
 // (a-bot, a-top, b-top) order so the right-hand-rule normals point
 // outward and FrontSide culling keeps them visible.
-function _makeWallsGeo(footprint, baseY, topY, vRepeatM = 4) {
-  const positions = [], uvs = [];
+// ── Baked ambient occlusion ───────────────────────────────────────────────
+// Nothing in the scene darkens where a building meets the ground, and that
+// missing contact shading is the single strongest cue that a render is
+// "3D" rather than cardboard cut-outs pasted on a photo. A real AO pass
+// (SSAO) is not available under the r0.128 UMD script set we ship, but the
+// dominant term — occlusion by the ground plane itself — is a pure
+// function of height above ground, so it can be baked into vertex colours
+// for free at build time.
+//
+// Returns the AO multiplier for a wall vertex `y` metres above `groundY`.
+const AO_HEIGHT_M = 6;     // fades out this far up the wall
+const AO_STRENGTH = 0.42;  // 1 - darkest multiplier at the very bottom
+function _wallAO(y, groundY) {
+  const t = Math.min(1, Math.max(0, (y - groundY) / AO_HEIGHT_M));
+  // Square root: occlusion falls off fast near the ground and lingers,
+  // which matches how a real contact shadow reads.
+  return 1 - AO_STRENGTH * (1 - Math.sqrt(t));
+}
+
+function _makeWallsGeo(footprint, baseY, topY, vRepeatM = 4, groundY) {
+  const positions = [], uvs = [], colors = [];
   const n = footprint.length;
-  const vMax = (topY - baseY) / vRepeatM;  // 4 m vertical repeat by default
+  const vMax = (topY - baseY) / vRepeatM;
+  // AO is measured from the BUILDING's ground line, not from this strip's
+  // own baseY — a shopfront band and the wall above it must share one
+  // continuous gradient, and a parapet 60 m up must get no AO at all.
+  const gY = (groundY == null) ? baseY : groundY;
+  const aoLo = _wallAO(baseY, gY), aoHi = _wallAO(topY, gY);
+  const push = (...v) => { for (const c of v) colors.push(c, c, c); };
   for (let i = 0; i < n; i++) {
     const a = footprint[i], b = footprint[(i + 1) % n];
     const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-    const uMax = segLen / 8;          // 8 m horizontal texture repeat
+    const uMax = segLen / FACADE_REPEAT_WIDTH_M;
     positions.push(a.x, baseY, a.z,   b.x, topY, b.z,    b.x, baseY, b.z);
     positions.push(a.x, baseY, a.z,   a.x, topY, a.z,    b.x, topY, b.z);
     uvs.push(0, 0,  uMax, vMax,  uMax, 0);
     uvs.push(0, 0,  0, vMax,     uMax, vMax);
+    push(aoLo, aoHi, aoLo);
+    push(aoLo, aoHi, aoHi);
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setAttribute('uv',       new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
   geo.computeVertexNormals();
   return geo;
 }
@@ -1007,9 +1049,23 @@ function _isConvex(pts) {
   let sign = 0;
   for (let i = 0; i < n; i++) {
     const a = pts[i], b = pts[(i + 1) % n], c = pts[(i + 2) % n];
-    const cross = (b.x - a.x) * (c.z - b.z) - (b.z - a.z) * (c.x - b.x);
-    if (Math.abs(cross) < 1e-6) continue;
-    const s = cross > 0 ? 1 : -1;
+    const ux = b.x - a.x, uz = b.z - a.z;
+    const vx = c.x - b.x, vz = c.z - b.z;
+    const cross = ux * vz - uz * vx;
+    // Normalise by the edge lengths so the threshold is a TURN ANGLE, not
+    // an area. The old test compared the raw cross product against 1e-6,
+    // which in metres-squared is essentially zero: a surveyed footprint
+    // whose wall jogs by a centimetre over 10 m yields a cross of ~0.1 and
+    // was read as a genuine reversal of direction. Almost every real OSM
+    // building therefore failed the convexity test and got demoted to a
+    // flat roof — including the simple rectangles-with-a-nick that pitched
+    // roofs handle perfectly well. sin(3 deg) tolerance keeps real L/U/T
+    // shapes rejected while accepting survey noise.
+    const len = Math.sqrt(ux * ux + uz * uz) * Math.sqrt(vx * vx + vz * vz);
+    if (len < 1e-9) continue;
+    const sinTurn = cross / len;
+    if (Math.abs(sinTurn) < 0.05) continue;
+    const s = sinTurn > 0 ? 1 : -1;
     if (sign === 0) sign = s;
     else if (s !== sign) return false;
   }
@@ -1250,7 +1306,27 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
 
   const cx = pts2d.reduce((s, p) => s + p.x, 0) / pts2d.length;
   const cz = pts2d.reduce((s, p) => s + p.z, 0) / pts2d.length;
-  const baseElev = getElevAt(elevGrid, gridN, cx / xSize, cz / zSize) * vertExag;
+
+  // Ground contact. Sampling the terrain at the CENTROID only means every
+  // building on a slope is planted at its middle height: the downhill half
+  // floats in mid-air and the uphill half is buried. On a 10 % grade a 40 m
+  // building floats/sinks by ±2 m — extremely visible, and it is what makes
+  // hillside districts look like scattered cards.
+  //
+  // Sample the whole footprint and sit the building on its LOWEST corner,
+  // so the downhill side meets the ground and the uphill side embeds into
+  // the slope. That is both what real construction does (cut and fill) and
+  // the only choice that never leaves a visible gap under a wall.
+  let baseElev = Infinity;
+  for (const p of pts2d) {
+    const e = getElevAt(elevGrid, gridN,
+      Math.min(1, Math.max(0, p.x / xSize)),
+      Math.min(1, Math.max(0, p.z / zSize))) * vertExag;
+    if (e < baseElev) baseElev = e;
+  }
+  if (!isFinite(baseElev)) {
+    baseElev = getElevAt(elevGrid, gridN, cx / xSize, cz / zSize) * vertExag;
+  }
 
   let style = getBuildingStyle(building.tags);
   // Wall colour priority: explicit OSM building:colour tag > Mapillary
@@ -1309,7 +1385,7 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   const groundTopY = baseY + groundH;
 
   if (wantShopfront) {
-    out.push({ geometry: _makeWallsGeo(pts2d, baseY, groundTopY, groundH),
+    out.push({ geometry: _makeWallsGeo(pts2d, baseY, groundTopY, groundH, baseY),
                material: _getShopfrontMat(style, bucket) });
   }
   // Floor-height-aware vertical UV repeat: one facade-texture window ROW
@@ -1322,7 +1398,7 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   const floorH = levelsTag > 0
     ? Math.max(2.4, Math.min(5, totalH / levelsTag)) : FACADE_STOREY_M;
   out.push({ geometry: _makeWallsGeo(pts2d, groundTopY, wallTop,
-                                     facadeRepeatMetres(style.type, floorH)),
+                                     facadeRepeatMetres(style.type, floorH), baseY),
              material: _getWallMat(style, bucket) });
 
   const pitched = roofShape !== 'flat' && roofH > 0.5;
@@ -1346,7 +1422,7 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   // upstand, no lid, deck stays visible.
   if (roofShape === 'flat' && totalH >= 6 && building.area >= 25) {
     const parapetH = Math.min(1.0, 0.4 + totalH * 0.012);
-    out.push({ geometry: _makeWallsGeo(pts2d, wallTop, wallTop + parapetH, parapetH),
+    out.push({ geometry: _makeWallsGeo(pts2d, wallTop, wallTop + parapetH, parapetH, baseY),
                material: _getParapetMat(style, bucket) });
   }
 
@@ -1370,6 +1446,11 @@ function _concatGeometries(geos) {
   const positions = new Float32Array(posLen);
   const normals   = new Float32Array(posLen);
   const uvs       = new Float32Array((posLen / 3) * 2);
+  // Baked AO travels as vertex colours. Geometries that carry none must
+  // default to WHITE — leaving the Float32Array at its zero fill would
+  // multiply those surfaces to black the moment any material in the merge
+  // has vertexColors enabled.
+  const colors    = new Float32Array(posLen).fill(1);
   let po = 0, uo = 0;
   for (const f of flat) {
     const g = f.geo;
@@ -1377,6 +1458,7 @@ function _concatGeometries(geos) {
     positions.set(pa, po);
     if (g.attributes.normal) normals.set(g.attributes.normal.array, po);
     if (g.attributes.uv) uvs.set(g.attributes.uv.array, uo);
+    if (g.attributes.color) colors.set(g.attributes.color.array, po);
     po += pa.length;
     uo += (pa.length / 3) * 2;
     if (f.temp) g.dispose();   // free the toNonIndexed scratch copy
@@ -1385,6 +1467,7 @@ function _concatGeometries(geos) {
   merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   merged.setAttribute('normal',   new THREE.BufferAttribute(normals, 3));
   merged.setAttribute('uv',       new THREE.BufferAttribute(uvs, 2));
+  merged.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
   return merged;
 }
 
