@@ -394,8 +394,61 @@ const FACADE_STOREY_M = 3;                       // metres per window row
 function FACADE_ROWS(type) {
   return type === 'glass' ? 8 : type === 'metal' ? 6 : 10;
 }
-function FACADE_COLS(type) {
+// ── Facade archetypes ──────────────────────────────────────────────────
+// The COMPOSITION of a facade, independent of its colour. Two buildings
+// with the same wall tone but different archetypes read as two different
+// buildings; two with different tones but the same archetype read as the
+// same building painted twice — which is what the old colour-only
+// variation produced across an entire city.
+//
+//   cols        openings per 8 m of wall (the horizontal module)
+//   wFrac/hFrac opening size as a fraction of its bay
+//   piers       raised vertical pier between bays (vertical emphasis)
+//   ribbon      one continuous horizontal band instead of separate bays
+//   balcony     projecting deck + railing per floor
+//   spandrel    opaque infill panel between stacked openings
+//   acUnits     split-AC condensers hung beside windows
+//   narrowPanes skip the vertical mullion (opening too narrow to split)
+const FACADE_ARCHETYPES = {
+  // Opaque-wall families
+  punched:  { cols: 5, wFrac: 0.44, hFrac: 0.50, acUnits: true },
+  grid:     { cols: 4, wFrac: 0.66, hFrac: 0.62 },
+  narrow:   { cols: 7, wFrac: 0.40, hFrac: 0.72, narrowPanes: true, acUnits: true },
+  balcony:  { cols: 3, wFrac: 0.78, hFrac: 0.58, balcony: true, acUnits: true },
+  banded:   { cols: 4, wFrac: 1.00, hFrac: 0.46, ribbon: true },
+  piered:   { cols: 5, wFrac: 0.56, hFrac: 0.66, piers: true, pierW: 7 },
+  industrial: { cols: 4, wFrac: 0.52, hFrac: 0.40 },
+  // Glazed families
+  curtain:  { cols: 5, wFrac: 0.92, hFrac: 0.84, glass: true },
+  mullion:  { cols: 7, wFrac: 0.80, hFrac: 0.86, glass: true, piers: true, pierW: 5, narrowPanes: true },
+  spandrel: { cols: 4, wFrac: 0.96, hFrac: 0.54, glass: true, spandrel: true },
+  ribbonGlass: { cols: 4, wFrac: 1.00, hFrac: 0.56, glass: true, ribbon: true },
+};
+
+function FACADE_COLS(type, archetype) {
+  const A = FACADE_ARCHETYPES[archetype];
+  if (A) return A.cols;
   return type === 'metal' ? 4 : 5;
+}
+
+// Pick an archetype for a building. Stable per building (bucket is a hash
+// of its footprint), and driven by HEIGHT as well as type — a 90 m tower
+// and a 3-storey shop should not share a facade language even when OSM
+// gives them the same building= value.
+function pickFacadeArchetype(type, totalH, bucket) {
+  const pick = list => list[bucket % list.length];
+  if (type === 'glass') {
+    if (totalH >= 60) return pick(['curtain', 'mullion', 'spandrel', 'curtain']);
+    if (totalH >= 25) return pick(['spandrel', 'curtain', 'ribbonGlass', 'mullion']);
+    return pick(['ribbonGlass', 'curtain', 'spandrel']);
+  }
+  if (type === 'metal') return 'industrial';
+  if (type === 'wood')  return pick(['punched', 'narrow', 'punched']);
+  if (type === 'brick') return pick(['punched', 'grid', 'narrow', 'piered', 'punched', 'grid']);
+  // concrete / generic
+  if (totalH >= 45) return pick(['banded', 'piered', 'grid', 'mullion', 'banded', 'spandrel']);
+  if (totalH >= 18) return pick(['balcony', 'grid', 'banded', 'piered', 'balcony', 'narrow']);
+  return pick(['punched', 'grid', 'narrow', 'balcony', 'punched', 'piered']);
 }
 // Metres of wall height covered by one full vertical texture repeat.
 function facadeRepeatMetres(type, storeyM) {
@@ -405,8 +458,9 @@ function facadeRepeatMetres(type, storeyM) {
 // _makeWallsGeo divides run length by 8, so this must stay 8.
 const FACADE_REPEAT_WIDTH_M = 8;
 
-function makeFacadeTexture(wallHex, type, bucket = 0) {
-  const key = `${wallHex.toString(16)}_${type}_${bucket}`;
+function makeFacadeTexture(wallHex, type, bucket = 0, archetype) {
+  archetype = archetype || pickFacadeArchetype(type, 20, bucket);
+  const key = `${wallHex.toString(16)}_${type}_${archetype}_${bucket}`;
   if (_facadeCache[key]) return _facadeCache[key];
 
   // 512 × 1024 — double resolution of the v1 canvas. Keeps window detail
@@ -420,7 +474,9 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
   const cvs = document.createElement('canvas');
   cvs.width = W; cvs.height = H;
   const ctx = cvs.getContext('2d');
-  const rng = _seededRng(((wallHex << 4) ^ bucket * 0x9e37) >>> 0);
+  let _aSeed = 0;
+  for (let i = 0; i < archetype.length; i++) _aSeed = (_aSeed * 31 + archetype.charCodeAt(i)) | 0;
+  const rng = _seededRng(((wallHex << 4) ^ (bucket * 0x9e37) ^ (_aSeed * 0x85eb)) >>> 0);
 
   const r = (wallHex >> 16) & 0xff;
   const g = (wallHex >> 8) & 0xff;
@@ -475,149 +531,192 @@ function makeFacadeTexture(wallHex, type, bucket = 0) {
   }
 
   // ── Window grid ──────────────────────────────────────────────────────
-  // Bigger windows, real depth (recess shadow), mullions, sub-panes,
-  // varied per-window lighting and shading suggestion. The grid is
-  // sized so ROWS rows fill the height and one row reads as one storey.
-  const COLS = FACADE_COLS(type);
+  // Driven by the ARCHETYPE, not just the colour. Previously every
+  // building of a given type got the identical window grid — same column
+  // count, same window proportions, same decoration — and only the wall
+  // HUE was jittered across 8 buckets. A street of that reads as one
+  // building copy-pasted, which is exactly the uncanny sameness this is
+  // here to break. Archetypes change the actual composition: how many
+  // openings per 8 m, how tall and wide they are, whether the floor reads
+  // as punched holes, a horizontal ribbon, a balcony deck or a curtain
+  // wall, and what sits between the openings.
+  const A = FACADE_ARCHETYPES[archetype] || FACADE_ARCHETYPES.grid;
+  const COLS = A.cols;
   const ROWS = FACADE_ROWS(type);
-  // No side padding: with padX on both edges the gap between the last
-  // window of one repeat and the first of the next was 2*padX instead of
-  // one column pitch, printing a blank double-width pier every 8 m across
-  // every long wall. Full-width pitch tiles seamlessly.
-  const padX = 0;
   const stepX = W / COLS;
   const stepY = H / ROWS;
-  const winW = stepX * (type === 'glass' ? 0.84 : type === 'metal' ? 0.55 : 0.66);
-  const winH = stepY * (type === 'glass' ? 0.78 : type === 'metal' ? 0.45 : 0.62);
+  const winW = stepX * A.wFrac;
+  const winH = stepY * A.hFrac;
+  const isGlass = !!A.glass;
 
-  // Floor-plate horizontal line for every storey — visible at distance
-  // (one of the few features that survives mipmap blur and so makes a
-  // distant building still read as a building rather than a slab).
-  ctx.strokeStyle = `rgba(0,0,0,${type === 'glass' ? 0.18 : 0.14})`;
+  // Spandrel bands: the opaque strip between stacked ribbon/curtain
+  // windows. Drawing it as its own tone is what separates a real curtain
+  // wall from a flat blue rectangle.
+  if (A.spandrel) {
+    ctx.fillStyle = `rgb(${_clamp8(r * 0.62)},${_clamp8(g * 0.64)},${_clamp8(b * 0.7)})`;
+    for (let row = 0; row < ROWS; row++) {
+      ctx.fillRect(0, row * stepY + winH + (stepY - winH) / 2, W, (stepY - winH) / 2);
+    }
+  }
+
+  // Floor-plate horizontal line for every storey — one of the very few
+  // features that survives mipmap blur, so it is what still makes a
+  // distant building read as a building rather than a solid slab.
+  ctx.strokeStyle = `rgba(0,0,0,${isGlass ? 0.18 : 0.14})`;
   ctx.lineWidth = 2;
   for (let row = 0; row <= ROWS; row++) {
     const y = row * stepY;
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   }
-  // Subtle horizontal band per floor: tints alternate floors by ±2 L —
-  // a building-shape silhouette emerges even at extreme mip levels.
   for (let row = 0; row < ROWS; row++) {
     if (row % 2) continue;
     ctx.fillStyle = 'rgba(0,0,0,0.04)';
     ctx.fillRect(0, row * stepY, W, stepY);
   }
 
+  // Vertical pier / mullion emphasis between bays. Turns an otherwise
+  // horizontal grid into a vertically-proportioned facade.
+  if (A.piers) {
+    ctx.fillStyle = `rgba(${_clamp8(r * 1.06)},${_clamp8(g * 1.06)},${_clamp8(b * 1.06)},0.9)`;
+    for (let col = 0; col < COLS; col++) {
+      const px = col * stepX + (stepX - winW) / 2 - A.pierW;
+      ctx.fillRect(px, 0, A.pierW, H);
+      ctx.fillStyle = 'rgba(0,0,0,0.10)';
+      ctx.fillRect(px + A.pierW - 1, 0, 1, H);
+      ctx.fillStyle = `rgba(${_clamp8(r * 1.06)},${_clamp8(g * 1.06)},${_clamp8(b * 1.06)},0.9)`;
+    }
+  }
+
   // Per-floor light bias so adjacent floors aren't independently random
-  // (real apartments have whole-floor occupancy patterns).
+  // (real buildings have whole-floor occupancy patterns).
   const floorLitBias = [];
   for (let row = 0; row < ROWS; row++) floorLitBias.push(rng());
 
-  // Per-column horizontal jitter once per column — windows on the same
-  // column align between floors (real buildings do this almost without
-  // exception; the old per-cell jitter looked drunk).
-  const colJit = [];
-  for (let col = 0; col < COLS; col++) colJit.push((rng() - 0.5) * 4);
+  const paintGlass = (wx, wy, ww, wh) => {
+    if (isGlass) {
+      const g1 = ctx.createLinearGradient(wx, wy, wx, wy + wh);
+      g1.addColorStop(0,    'rgb(170,215,240)');
+      g1.addColorStop(0.45, 'rgb(120,185,225)');
+      g1.addColorStop(1,    'rgb(70,140,195)');
+      ctx.fillStyle = g1;
+      ctx.fillRect(wx, wy, ww, wh);
+      const refl = ctx.createLinearGradient(wx, wy + wh * 0.3, wx + ww, wy + wh * 0.7);
+      refl.addColorStop(0,    'rgba(255,255,255,0.0)');
+      refl.addColorStop(0.45, 'rgba(255,255,255,0.18)');
+      refl.addColorStop(0.5,  'rgba(255,255,255,0.0)');
+      ctx.fillStyle = refl;
+      ctx.fillRect(wx, wy, ww, wh);
+      return;
+    }
+    // DAYLIGHT windows are DARKER than the wall: you are looking into an
+    // unlit interior with a slice of sky reflected off the top of the pane.
+    const rowIdx = Math.floor(wy / stepY);
+    const litRoll = ((floorLitBias[rowIdx] || 0.5) * 0.7 + rng() * 0.3);
+    const lit = litRoll > 0.86;
+    const grad = ctx.createLinearGradient(wx, wy, wx, wy + wh);
+    if (lit) {
+      grad.addColorStop(0,   'rgb(255,238,196)');
+      grad.addColorStop(0.4, 'rgb(246,220,166)');
+      grad.addColorStop(1,   'rgb(214,182,130)');
+    } else {
+      grad.addColorStop(0,    'rgb(108,132,158)');
+      grad.addColorStop(0.35, 'rgb(52,68,90)');
+      grad.addColorStop(1,    'rgb(28,36,52)');
+    }
+    ctx.fillStyle = grad;
+    ctx.fillRect(wx, wy, ww, wh);
+    if (!lit && rng() < 0.22) {
+      const blindH = wh * (0.3 + rng() * 0.55);
+      ctx.fillStyle = 'rgba(220,210,190,0.85)';
+      ctx.fillRect(wx, wy, ww, blindH);
+      ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+      ctx.lineWidth = 1;
+      for (let by = wy + 3; by < wy + blindH; by += 4) {
+        ctx.beginPath(); ctx.moveTo(wx, by); ctx.lineTo(wx + ww, by); ctx.stroke();
+      }
+    }
+  };
 
   for (let row = 0; row < ROWS; row++) {
-    for (let col = 0; col < COLS; col++) {
-      const wx = padX + col * stepX + (stepX - winW) / 2 + colJit[col];
-      const wy = row * stepY + (stepY - winH) / 2;
+    const wy = row * stepY + (stepY - winH) / 2;
 
-      // 1. Recessed frame: a darker rectangle slightly larger than the
-      // glass, giving every window a hint of depth.
+    if (A.ribbon) {
+      // Continuous horizontal band across the whole repeat — the defining
+      // move of a mid-century office block. Tiles seamlessly by
+      // construction because it spans the full canvas width.
+      ctx.fillStyle = `rgba(${_clamp8(r * 0.35)},${_clamp8(g * 0.35)},${_clamp8(b * 0.35)},0.55)`;
+      ctx.fillRect(0, wy - 2, W, winH + 4);
+      paintGlass(0, wy, W, winH);
+      // Vertical glazing bars subdivide the ribbon.
+      ctx.fillStyle = `rgba(${_clamp8(r * 0.55)},${_clamp8(g * 0.55)},${_clamp8(b * 0.55)},0.85)`;
+      const bars = COLS * 3;
+      for (let i = 1; i < bars; i++) ctx.fillRect(i * (W / bars) - 0.6, wy, 1.2, winH);
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(0, wy, W, winH);
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      ctx.fillRect(0, wy + winH + 2, W, 1.5);
+      continue;
+    }
+
+    for (let col = 0; col < COLS; col++) {
+      // Columns align floor-to-floor: real buildings stack their openings
+      // almost without exception, so no per-cell jitter here.
+      const wx = col * stepX + (stepX - winW) / 2;
+
+      // Recessed reveal — a darker ring slightly larger than the opening,
+      // which is what gives a flat texture a sense of wall thickness.
       ctx.fillStyle = `rgba(${_clamp8(r * 0.35)},${_clamp8(g * 0.35)},${_clamp8(b * 0.35)},0.55)`;
       ctx.fillRect(wx - 2, wy - 1, winW + 4, winH + 3);
 
-      // 2. Glass itself.
-      if (type === 'glass') {
-        // Curtain-wall: cool blue gradient simulating sky reflection.
-        const g1 = ctx.createLinearGradient(wx, wy, wx, wy + winH);
-        g1.addColorStop(0,    'rgb(170,215,240)');
-        g1.addColorStop(0.45, 'rgb(120,185,225)');
-        g1.addColorStop(1,    'rgb(70,140,195)');
-        ctx.fillStyle = g1;
-        ctx.fillRect(wx, wy, winW, winH);
-        // Building-across reflection — diagonal slash darker.
-        const refl = ctx.createLinearGradient(wx, wy + winH * 0.3, wx + winW, wy + winH * 0.7);
-        refl.addColorStop(0,    'rgba(255,255,255,0.0)');
-        refl.addColorStop(0.45, 'rgba(255,255,255,0.18)');
-        refl.addColorStop(0.5,  'rgba(255,255,255,0.0)');
-        ctx.fillStyle = refl;
-        ctx.fillRect(wx, wy, winW, winH);
-      } else {
-        // DAYLIGHT windows are DARKER than the wall, not brighter: you are
-        // looking into an unlit interior with a slice of sky reflected off
-        // the top of the pane. The previous version painted ~68 % of
-        // windows in the 200–225 range — indistinguishable from a
-        // 212,204,192 wall — so most of the grid was invisible and the
-        // facade read as a blank slab. Now the default is dark glass
-        // (strong contrast against any pale wall) and only a minority are
-        // warm-lit, which reads as occupancy rather than noise.
-        const litRoll = (floorLitBias[row] * 0.7 + rng() * 0.3);
-        const lit = litRoll > 0.86;
-        if (lit) {
-          // Warm interior light spilling out.
-          const gradL = ctx.createLinearGradient(wx, wy, wx, wy + winH);
-          gradL.addColorStop(0,   'rgb(255,238,196)');
-          gradL.addColorStop(0.4, 'rgb(246,220,166)');
-          gradL.addColorStop(1,   'rgb(214,182,130)');
-          ctx.fillStyle = gradL;
-        } else {
-          // Dark interior with a sky reflection fading down the pane.
-          const gradD = ctx.createLinearGradient(wx, wy, wx, wy + winH);
-          gradD.addColorStop(0,   'rgb(108,132,158)');
-          gradD.addColorStop(0.35, 'rgb(52,68,90)');
-          gradD.addColorStop(1,   'rgb(28,36,52)');
-          ctx.fillStyle = gradD;
-        }
-        ctx.fillRect(wx, wy, winW, winH);
+      paintGlass(wx, wy, winW, winH);
 
-        // 10% of unlit windows: blind/curtain partially drawn.
-        if (!lit && rng() < 0.22) {
-          const blindH = winH * (0.3 + rng() * 0.55);
-          ctx.fillStyle = 'rgba(220,210,190,0.85)';
-          ctx.fillRect(wx, wy, winW, blindH);
-          // Blind slat shadows
-          ctx.strokeStyle = 'rgba(0,0,0,0.18)';
-          ctx.lineWidth = 1;
-          for (let by = wy + 3; by < wy + blindH; by += 4) {
-            ctx.beginPath(); ctx.moveTo(wx, by); ctx.lineTo(wx + winW, by); ctx.stroke();
-          }
-        }
-      }
-
-      // 3. Mullions — vertical centre + horizontal middle. 2 panes wide
-      // × 2 panes tall = 4-pane window, which is what most apartment
-      // and office windows actually look like.
+      // Mullions: a 2x2 pane split reads correctly for most windows;
+      // narrow openings get only the horizontal transom.
       ctx.fillStyle = `rgba(${_clamp8(r * 0.5)},${_clamp8(g * 0.5)},${_clamp8(b * 0.5)},0.8)`;
-      ctx.fillRect(wx + winW / 2 - 0.6, wy, 1.2, winH);
+      if (!A.narrowPanes) ctx.fillRect(wx + winW / 2 - 0.6, wy, 1.2, winH);
       ctx.fillRect(wx, wy + winH / 2 - 0.6, winW, 1.2);
 
-      // 4. Outer frame line — crisp black-ish.
       ctx.strokeStyle = 'rgba(0,0,0,0.55)';
       ctx.lineWidth = 1.2;
       ctx.strokeRect(wx, wy, winW, winH);
 
-      // 5. Sill — small light strip just under the window for shadow
-      // contrast, helps the eye read 3D depth from a flat texture.
+      // Sill highlight under the opening — cheap depth cue.
       ctx.fillStyle = 'rgba(255,255,255,0.25)';
       ctx.fillRect(wx - 2, wy + winH + 2, winW + 4, 1.5);
 
-      // 6. AC unit (residential only, ~6% of unlit windows).
-      if (type === 'concrete' && rng() < 0.06) {
-        const acX = wx + winW - 8, acY = wy + winH * 0.55;
-        ctx.fillStyle = 'rgb(190,190,182)';
-        ctx.fillRect(acX, acY, 18, winH * 0.38);
-        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-        ctx.strokeRect(acX, acY, 18, winH * 0.38);
+      // Split-AC condenser hung beside the window: ubiquitous on Japanese
+      // apartment blocks and instantly readable at close range.
+      if (A.acUnits && rng() < 0.14) {
+        const acW = Math.min(18, stepX * 0.22);
+        const acX = wx + winW + 1, acY = wy + winH * 0.5;
+        ctx.fillStyle = 'rgb(196,196,188)';
+        ctx.fillRect(acX, acY, acW, winH * 0.36);
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        ctx.strokeRect(acX, acY, acW, winH * 0.36);
         ctx.fillStyle = 'rgba(0,0,0,0.25)';
-        for (let li = 0; li < 4; li++) ctx.fillRect(acX + 2, acY + 4 + li * 4, 14, 1);
+        for (let li = 0; li < 4; li++) ctx.fillRect(acX + 2, acY + 4 + li * 4, acW - 4, 1);
       }
+    }
+
+    // Balcony deck + railing spanning the whole floor. This single feature
+    // is what makes an apartment block read as an apartment block rather
+    // than an office.
+    if (A.balcony) {
+      const by = row * stepY + stepY * 0.90;
+      ctx.fillStyle = `rgba(${_clamp8(r * 0.72)},${_clamp8(g * 0.72)},${_clamp8(b * 0.72)},0.95)`;
+      ctx.fillRect(0, by, W, stepY * 0.10);
+      ctx.fillStyle = 'rgba(255,255,255,0.20)';
+      ctx.fillRect(0, by, W, 1.5);
+      ctx.fillStyle = 'rgba(40,44,52,0.55)';
+      for (let bx = 3; bx < W; bx += 9) ctx.fillRect(bx, by - stepY * 0.14, 1.6, stepY * 0.14);
+      ctx.fillStyle = 'rgba(40,44,52,0.75)';
+      ctx.fillRect(0, by - stepY * 0.15, W, 2);
     }
   }
 
-  // Mipmap-friendly post: subtle vignette on each floor so a heavily
-  // shrunk version still shows horizontal banding (= floors).
+  // Mipmap-friendly post: per-floor vignette so a heavily shrunk version
+  // still shows horizontal banding (= floors) instead of flat colour.
   for (let row = 0; row < ROWS; row++) {
     const y0 = row * stepY;
     const grd = ctx.createLinearGradient(0, y0, 0, y0 + stepY);
@@ -883,7 +982,7 @@ function resetBuildingCaches() {
   for (const k in _facadeCache) delete _facadeCache[k];
   for (const k in _roofTexCache) delete _roofTexCache[k];
   for (const k in _shopfrontCache) delete _shopfrontCache[k];
-  _roofEquipMat = null;  // disposed by clearSceneObjects; rebuild next run
+  _roofEquipMat = null;  // map of kind->material; disposed by clearSceneObjects
   _aerialRoof = null;
   _facadePalette = null;
   _cc0Walls = null;
@@ -921,9 +1020,10 @@ function _aerialUVRoof(geo) {
   return geo;
 }
 
-function _getWallMat(style, bucket = 0) {
+function _getWallMat(style, bucket = 0, archetype) {
   const off = HSL_OFFSETS[bucket % STYLE_VARIANTS];
   const wallHex = _jitterHexHSL(style.wall, off.dh, off.ds, off.dl);
+  archetype = archetype || pickFacadeArchetype(style.type, 20, bucket);
   // CC0 photo-texture branch: one shared material per building TYPE
   // (the photo carries every detail — windows, panels, weathering — so
   // we don't bucket-jitter it). Falls back to procedural for any type
@@ -937,9 +1037,9 @@ function _getWallMat(style, bucket = 0) {
     _matCache.wall[ckey] = mat;
     return mat;
   }
-  const key = `${wallHex.toString(16)}_${style.type}_${bucket}`;
+  const key = `${wallHex.toString(16)}_${style.type}_${archetype}_${bucket}`;
   if (_matCache.wall[key]) return _matCache.wall[key];
-  const tex = makeFacadeTexture(wallHex, style.type, bucket);
+  const tex = makeFacadeTexture(wallHex, style.type, bucket, archetype);
   // vertexColors carries the baked ground-contact AO from _makeWallsGeo.
   const mat = new THREE.MeshLambertMaterial({ map: tex, vertexColors: true });
   mat.name = `wall_${key}`;
@@ -1021,10 +1121,21 @@ function _wallAO(y, groundY) {
   return 1 - AO_STRENGTH * (1 - Math.sqrt(t));
 }
 
-function _makeWallsGeo(footprint, baseY, topY, vRepeatM = 4, groundY) {
+function _makeWallsGeo(footprint, baseY, topY, vRepeatM = 4, groundY, cols) {
   const positions = [], uvs = [], colors = [];
   const n = footprint.length;
   const vMax = (topY - baseY) / vRepeatM;
+  // Snap each wall face to a WHOLE number of window modules.
+  //
+  // Mapping U as segLen/8 means a 13.4 m wall gets 1.675 texture repeats,
+  // so the wall ends 0.675 of the way through the grid — chopping a window
+  // vertically at that corner. Every building had a sliced window at every
+  // corner, which is one of those defects the eye reads as "wrong" long
+  // before it can name it. Rounding the span to an integer count of window
+  // modules costs at most half a module of texel stretch (a few per cent,
+  // invisible) and buys clean openings at every corner.
+  const nCols = cols || 5;
+  const moduleM = FACADE_REPEAT_WIDTH_M / nCols;
   // AO is measured from the BUILDING's ground line, not from this strip's
   // own baseY — a shopfront band and the wall above it must share one
   // continuous gradient, and a parapet 60 m up must get no AO at all.
@@ -1034,7 +1145,8 @@ function _makeWallsGeo(footprint, baseY, topY, vRepeatM = 4, groundY) {
   for (let i = 0; i < n; i++) {
     const a = footprint[i], b = footprint[(i + 1) % n];
     const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-    const uMax = segLen / FACADE_REPEAT_WIDTH_M;
+    const modules = Math.max(1, Math.round(segLen / moduleM));
+    const uMax = modules / nCols;
     positions.push(a.x, baseY, a.z,   b.x, topY, b.z,    b.x, baseY, b.z);
     positions.push(a.x, baseY, a.z,   a.x, topY, a.z,    b.x, topY, b.z);
     uvs.push(0, 0,  uMax, vMax,  uMax, 0);
@@ -1233,12 +1345,30 @@ function _makeRoofGeo(shape, footprint, baseY, topY) {
 // flat roof read as a real building from an oblique / top-down view
 // instead of a clean slab. Shared flat-grey material (no texture).
 let _roofEquipMat = null;
-function _getRoofEquipMat() {
-  if (!_roofEquipMat) {
-    _roofEquipMat = new THREE.MeshLambertMaterial({ color: 0x8a8a86 });
-    _roofEquipMat.name = 'roof_equipment';
+// Rooftops are the primary surface in a top-down city view, and everything
+// up there used to be ONE flat grey box archetype in ONE flat grey
+// material — so from above the city read as bare slabs with a few identical
+// pebbles. Real roofs are a jumble of distinguishable objects: pale metal
+// plant housings, dark condenser banks, a stair penthouse in the wall's own
+// concrete, a glinting water tank, green-grey vent stacks.
+const ROOF_EQUIP_MATS = {
+  plant:  { color: 0xa8a9a4 },   // painted metal housings
+  duct:   { color: 0x8d9296 },   // galvanised ductwork
+  dark:   { color: 0x55585c },   // condenser coils / louvred units
+  tank:   { color: 0xb4bcc0 },   // stainless / FRP water tank
+  house:  { color: 0xbdb8ae },   // stair + lift penthouse (building-ish)
+  vent:   { color: 0x6f7a72 },   // vent stacks
+  solar:  { color: 0x2a3550 },   // PV array
+};
+function _getRoofEquipMat(kind) {
+  if (!_roofEquipMat) _roofEquipMat = {};
+  const k = ROOF_EQUIP_MATS[kind] ? kind : 'plant';
+  if (!_roofEquipMat[k]) {
+    const m = new THREE.MeshLambertMaterial({ color: ROOF_EQUIP_MATS[k].color });
+    m.name = 'roof_equip_' + k;
+    _roofEquipMat[k] = m;
   }
-  return _roofEquipMat;
+  return _roofEquipMat[k];
 }
 
 function _ptInPoly2d(x, z, poly) {
@@ -1265,33 +1395,110 @@ function _emitBox(P, cx, cz, bx, bz, by, y0) {
   P.push(xr,y0,zb, xr,y1,zf, xr,y0,zf,  xr,y0,zb, xr,y1,zb, xr,y1,zf); // east +X
 }
 
-function _emitRoofEquipment(out, footprint, roofY, bucket, areaM2) {
-  const rng = _seededRng((bucket * 0x2f1b + 911) >>> 0);
+function _emitRoofEquipment(out, footprint, roofY, bucket, areaM2, totalH, style) {
+  // Seed from the footprint's first vertex as well as the bucket: seeding
+  // on the bucket alone gave the whole city only 8 distinct rooftop
+  // layouts, endlessly repeated.
+  const seedP = footprint[0] || { x: 0, z: 0 };
+  const rng = _seededRng(
+    ((bucket * 0x2f1b + 911) ^ Math.imul(Math.round(seedP.x * 7) | 0, 0x9e3779b1)
+      ^ Math.imul(Math.round(seedP.z * 7) | 0, 0x85ebca6b)) >>> 0);
+
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (const p of footprint) {
     if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
     if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
   }
-  // More boxes on bigger roofs, capped at 6.
-  const count = Math.min(6, 2 + Math.floor(areaM2 / 400) + Math.floor(rng() * 2));
-  const P = [];
-  let placed = 0, tries = 0;
-  while (placed < count && tries < count * 6) {
-    tries++;
-    const x = minX + rng() * (maxX - minX);
-    const z = minZ + rng() * (maxZ - minZ);
-    if (!_ptInPoly2d(x, z, footprint)) continue;
-    const bx = 1 + rng() * 2;    // 1-3 m
-    const bz = 1 + rng() * 2;
-    const by = 1 + rng() * 1.5;  // 1-2.5 m
-    _emitBox(P, x, z, bx, bz, by, roofY);
-    placed++;
+  const spanX = maxX - minX, spanZ = maxZ - minZ;
+  const short = Math.min(spanX, spanZ);
+  if (short < 4) return;
+
+  // Buckets of geometry per material, so all the plant across the whole
+  // city still merges into a handful of draw calls.
+  const byKind = {};
+  const emit = (kind, x, z, bx, bz, by, y0) => {
+    if (!_ptInPoly2d(x, z, footprint)) return false;
+    if (!byKind[kind]) byKind[kind] = [];
+    _emitBox(byKind[kind], x, z, bx, bz, by, y0);
+    return true;
+  };
+  const spot = () => ({
+    x: minX + (0.12 + rng() * 0.76) * spanX,
+    z: minZ + (0.12 + rng() * 0.76) * spanZ,
+  });
+
+  // 1. Stair / lift penthouse — the tallest thing on most roofs, and the
+  //    one that most reads as "this is a real building".
+  if (totalH >= 12 && short >= 8 && rng() < 0.85) {
+    const p = spot();
+    const w = Math.min(short * 0.42, 4 + rng() * 4);
+    emit('house', p.x, p.z, w, w * (0.7 + rng() * 0.6), 2.6 + rng() * 1.6, roofY);
   }
-  if (P.length === 0) return;
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
-  geo.computeVertexNormals();
-  out.push({ geometry: geo, material: _getRoofEquipMat() });
+
+  // 2. Condenser / chiller banks — rows of dark louvred units. Rows, not
+  //    scattered singles: plant is always laid out in service rows.
+  const rows = Math.min(3, 1 + Math.floor(areaM2 / 700));
+  for (let r = 0; r < rows; r++) {
+    const p = spot();
+    const n = 2 + Math.floor(rng() * 3);
+    const uw = 1.2 + rng() * 0.9, ud = 0.9 + rng() * 0.7;
+    const along = rng() < 0.5;
+    for (let i = 0; i < n; i++) {
+      const off = (i - (n - 1) / 2) * (uw + 0.5);
+      emit('dark', p.x + (along ? off : 0), p.z + (along ? 0 : off),
+           along ? uw : ud, along ? ud : uw, 1.0 + rng() * 0.8, roofY);
+    }
+  }
+
+  // 3. Air-handling plant housings.
+  const plantN = Math.min(4, 1 + Math.floor(areaM2 / 500));
+  for (let i = 0; i < plantN; i++) {
+    const p = spot();
+    emit('plant', p.x, p.z, 1.6 + rng() * 2.6, 1.4 + rng() * 2.2, 1.2 + rng() * 1.4, roofY);
+  }
+
+  // 4. Water tank on legs — a Japanese-rooftop signature. The legs are a
+  //    thin box under a wider one, which reads correctly from the air.
+  if (short >= 7 && rng() < 0.5) {
+    const p = spot();
+    const w = 2.0 + rng() * 1.6;
+    if (emit('plant', p.x, p.z, w * 0.7, w * 0.7, 1.4 + rng() * 0.8, roofY)) {
+      emit('tank', p.x, p.z, w, w * 0.85, 1.6 + rng() * 0.8, roofY + 1.4 + rng() * 0.4);
+    }
+  }
+
+  // 5. Vent stacks — small, tall, and they break up the silhouette.
+  const vents = 1 + Math.floor(rng() * 3);
+  for (let i = 0; i < vents; i++) {
+    const p = spot();
+    emit('vent', p.x, p.z, 0.4 + rng() * 0.4, 0.4 + rng() * 0.4, 1.2 + rng() * 1.6, roofY);
+  }
+
+  // 6. Ductwork runs connecting plant.
+  if (rng() < 0.55) {
+    const p = spot();
+    const len = Math.min(short * 0.6, 4 + rng() * 8);
+    const along = rng() < 0.5;
+    emit('duct', p.x, p.z, along ? len : 0.8, along ? 0.8 : len, 0.7, roofY + 0.3);
+  }
+
+  // 7. PV array on a minority of large low-rise roofs.
+  if (areaM2 >= 400 && totalH < 30 && rng() < 0.25) {
+    const p = spot();
+    const n = 2 + Math.floor(rng() * 3);
+    for (let i = 0; i < n; i++) {
+      emit('solar', p.x, p.z + i * 2.2, Math.min(spanX * 0.5, 5 + rng() * 4), 1.6, 0.5, roofY + 0.35);
+    }
+  }
+
+  for (const kind of Object.keys(byKind)) {
+    const P = byKind[kind];
+    if (!P || P.length === 0) continue;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+    geo.computeVertexNormals();
+    out.push({ geometry: geo, material: _getRoofEquipMat(kind) });
+  }
 }
 
 // ── Building assembly ──────────────────────────────────────────────────────
@@ -1400,7 +1607,7 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   const groundTopY = baseY + groundH;
 
   if (wantShopfront) {
-    out.push({ geometry: _makeWallsGeo(pts2d, baseY, groundTopY, groundH, baseY),
+    out.push({ geometry: _makeWallsGeo(pts2d, baseY, groundTopY, groundH, baseY, 4),
                material: _getShopfrontMat(style, bucket) });
   }
   // Floor-height-aware vertical UV repeat: one facade-texture window ROW
@@ -1412,16 +1619,57 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   const levelsTag = _posFloat(tagsB['building:levels'] ?? tagsB.levels, 0);
   const floorH = levelsTag > 0
     ? Math.max(2.4, Math.min(5, totalH / levelsTag)) : FACADE_STOREY_M;
-  out.push({ geometry: _makeWallsGeo(pts2d, groundTopY, wallTop,
-                                     facadeRepeatMetres(style.type, floorH), baseY),
-             material: _getWallMat(style, bucket) });
+  const archetype = pickFacadeArchetype(style.type, totalH, bucket);
+  const wallCols = FACADE_COLS(style.type, archetype);
+  const wallMat = _getWallMat(style, bucket, archetype);
+  const vRepeat = facadeRepeatMetres(style.type, floorH);
+
+  // ── Massing ──────────────────────────────────────────────────────────
+  // Every building used to be one uniform prism from ground to roof, so a
+  // skyline was a bar chart: no podium, no setback, no cap. Real towers
+  // almost always step. A podium at street scale with the tower inset
+  // above it is the single cheapest move that turns a bar chart back into
+  // a skyline, and it costs one extra wall strip plus one slab.
+  const canSetback = roofShape === 'flat' && totalH >= 30 && building.area >= 150
+                     && _isConvex(pts2d) && (bucket % 4) !== 3;
+  let towerPts = pts2d, towerBase = groundTopY;
+  if (canSetback) {
+    const podiumH = Math.min(16, Math.max(8, totalH * 0.18));
+    const podiumTop = baseElev + podiumH;
+    if (podiumTop < wallTop - 8) {
+      // Podium: full footprint, street-scale, its own facade.
+      out.push({ geometry: _makeWallsGeo(pts2d, groundTopY, podiumTop, vRepeat, baseY, wallCols),
+                 material: wallMat });
+      // Setback roof slab — the podium's exposed terrace.
+      out.push({ geometry: _makeFlatRoofGeo(pts2d, podiumTop),
+                 material: _getRoofMat(style, false, bucket) });
+      // Tower: inset footprint above.
+      const inset = 0.80 + (bucket % 3) * 0.05;
+      towerPts = pts2d.map(p => ({ x: cx + (p.x - cx) * inset, z: cz + (p.z - cz) * inset }));
+      towerBase = podiumTop;
+    }
+  }
+
+  out.push({ geometry: _makeWallsGeo(towerPts, towerBase, wallTop, vRepeat, baseY, wallCols),
+             material: wallMat });
+
+  // Cornice / cap band: a slightly proud ring at the very top. Real
+  // buildings terminate; a prism just stops. This is a 0.6-1.2 m band and
+  // it does a disproportionate amount of work on the silhouette.
+  if (roofShape === 'flat' && totalH >= 12 && building.area >= 40) {
+    const capH = Math.min(1.2, 0.5 + totalH * 0.008);
+    const grow = 1.012;
+    const capPts = towerPts.map(p => ({ x: cx + (p.x - cx) * grow, z: cz + (p.z - cz) * grow }));
+    out.push({ geometry: _makeWallsGeo(capPts, wallTop - capH, wallTop, capH, baseY, wallCols),
+               material: _getParapetMat(style, bucket) });
+  }
 
   const pitched = roofShape !== 'flat' && roofH > 0.5;
   if (roofShape === 'flat' && _aerialRoof) {
-    out.push({ geometry: _aerialUVRoof(_makeRoofGeo('flat', pts2d, wallTop, roofTop)),
+    out.push({ geometry: _aerialUVRoof(_makeRoofGeo('flat', towerPts, wallTop, roofTop)),
                material: _aerialRoof.mat });
   } else {
-    out.push({ geometry: _makeRoofGeo(roofShape, pts2d, wallTop, roofTop),
+    out.push({ geometry: _makeRoofGeo(roofShape, towerPts, wallTop, roofTop),
                material: _getRoofMat(style, pitched, bucket) });
   }
 
@@ -1437,13 +1685,14 @@ function buildingToParts(building, bb, elevGrid, gridN, vertExag, out) {
   // upstand, no lid, deck stays visible.
   if (roofShape === 'flat' && totalH >= 6 && building.area >= 25) {
     const parapetH = Math.min(1.0, 0.4 + totalH * 0.012);
-    out.push({ geometry: _makeWallsGeo(pts2d, wallTop, wallTop + parapetH, parapetH, baseY),
+    out.push({ geometry: _makeWallsGeo(towerPts, wallTop, wallTop + parapetH,
+                                       parapetH, baseY, wallCols),
                material: _getParapetMat(style, bucket) });
   }
 
   // Rooftop equipment (HVAC / water tank / stairwell box) on flat roofs.
-  if (roofShape === 'flat' && totalH >= 9 && building.area >= 120) {
-    _emitRoofEquipment(out, pts2d, wallTop, bucket, building.area);
+  if (roofShape === 'flat' && totalH >= 6 && building.area >= 60) {
+    _emitRoofEquipment(out, towerPts, wallTop, bucket, building.area, totalH, style);
   }
 }
 
