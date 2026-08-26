@@ -144,6 +144,29 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
         <label for="togglePlateau" style="margin:0">PLATEAU LOD2 を優先（日本のみ） ✨</label>
       </div>
       <div style="margin-top:10px">
+        <label>レイヤー <span style="color:#81d4fa;font-size:0.72rem">（再生成なしで即時切替）</span></label>
+        <div class="toggle-row" style="margin-top:4px">
+          <input type="checkbox" id="layerRoads" checked/>
+          <label for="layerRoads" style="margin:0">道路・橋</label>
+        </div>
+        <div class="toggle-row" style="margin-top:4px">
+          <input type="checkbox" id="layerRails" checked/>
+          <label for="layerRails" style="margin:0">線路</label>
+        </div>
+        <div class="toggle-row" style="margin-top:4px">
+          <input type="checkbox" id="layerWater" checked/>
+          <label for="layerWater" style="margin:0">水域</label>
+        </div>
+        <div class="toggle-row" style="margin-top:4px">
+          <input type="checkbox" id="layerTrees" checked/>
+          <label for="layerTrees" style="margin:0">樹木</label>
+        </div>
+        <div class="toggle-row" style="margin-top:4px">
+          <input type="checkbox" id="layerTerrain" checked/>
+          <label for="layerTerrain" style="margin:0">地形・航空写真</label>
+        </div>
+      </div>
+      <div style="margin-top:10px">
         <label>垂直誇張 <span style="color:#81d4fa;font-size:0.75rem">（平地は2〜3倍推奨）</span></label>
         <input type="range" id="vertExag" min="1" max="5" step="0.5" value="2"/>
         <div id="exagLabel" style="font-size:0.82rem;color:#81d4fa;text-align:right;margin-top:2px">2.0x</div>
@@ -223,6 +246,8 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
         <input type="range" id="timeOfDay" min="0" max="24" step="0.25" value="13.5"/>
       </div>
     </div>
+
+    <button id="cancelBtn" style="display:none;width:100%;padding:7px;background:#2a1a2e;border:1px solid #ff8a8a;color:#ff8a8a;border-radius:6px;font-size:0.82rem;cursor:pointer;margin-top:6px">✕ 生成を中止</button>
 
     <div id="progressWrap">
       <div id="progressTrack"><div id="progressBar"></div></div>
@@ -309,15 +334,15 @@ input[type=range]{width:100%;accent-color:#4fc3f7;cursor:pointer}
 <!-- JSZip for DAE+texture bundling -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-<script src="js/coords.js?v=lighting4"></script>
-<script src="js/cache.js?v=lighting4"></script>
-<script src="js/terrain.js?v=lighting4"></script>
-<script src="js/cc0textures.js?v=lighting4"></script>
-<script src="js/buildings.js?v=lighting4"></script>
-<script src="js/features.js?v=lighting4"></script>
-<script src="js/plateau.js?v=lighting4"></script>
-<script src="js/export.js?v=lighting4"></script>
-<script src="js/scene.js?v=lighting4"></script>
-<script src="js/app.js?v=lighting4"></script>
+<script src="js/coords.js?v=perf1"></script>
+<script src="js/cache.js?v=perf1"></script>
+<script src="js/terrain.js?v=perf1"></script>
+<script src="js/cc0textures.js?v=perf1"></script>
+<script src="js/buildings.js?v=perf1"></script>
+<script src="js/features.js?v=perf1"></script>
+<script src="js/plateau.js?v=perf1"></script>
+<script src="js/export.js?v=perf1"></script>
+<script src="js/scene.js?v=perf1"></script>
+<script src="js/app.js?v=perf1"></script>
 </body>
 </html>

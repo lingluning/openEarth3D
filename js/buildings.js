@@ -1486,7 +1486,10 @@ function _concatGeometries(geos) {
   return merged;
 }
 
-function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag, opts) {
+// Async because it yields to the event loop while working: generating a
+// few thousand buildings means thousands of geometries plus dozens of
+// 512x1024 facade canvases, which is seconds of blocking work.
+async function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag, opts) {
   // Aerial roof projection for this run (see _aerialRoof). Set before any
   // buildingToParts call; reset by resetBuildingCaches between runs.
   _aerialRoof = null;
@@ -1499,10 +1502,16 @@ function createBuildingGroup(buildings, bb, elevGrid, gridN, vertExag, opts) {
     ? opts.facadePalette : null;
   _cc0Walls = (opts && opts.cc0Walls instanceof Map && opts.cc0Walls.size)
     ? opts.cc0Walls : null;
+  // Yield every 64 buildings — often enough that the progress bar animates
+  // and a cancel click lands, rare enough that the task round-trips do not
+  // dominate the work itself.
+  const yieldEvery = (typeof makeThrottledYield === 'function')
+    ? makeThrottledYield(64) : null;
   // Collect every geometry part across all buildings, keyed by material.
   const byMaterial = new Map();
   for (const b of buildings) {
     const parts = [];
+    if (yieldEvery) await yieldEvery();
     try {
       buildingToParts(b, bb, elevGrid, gridN, vertExag, parts);
     } catch { continue; }

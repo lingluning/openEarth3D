@@ -242,6 +242,10 @@ async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
     tileMap[`${tx}_${ty}`] = await fetchDemTileCascade(z, tx, ty);
     done++;
     onProgress && onProgress(done / total * 0.85, `地形タイル z${z} ${done}/${total} 取得中…`);
+    // Cancellation checkpoint. Downloads are where a run actually spends
+    // its time, so without a check here "cancel" does nothing until the
+    // very end — which is indistinguishable from being ignored.
+    if (typeof jobYield === 'function') await jobYield();
   });
 
   // Stitch all fetched tiles into one mosaic so interpolation kernels can
@@ -287,6 +291,7 @@ async function fetchElevGridHiRes(bb, meshN, onProgress, zoom) {
     }
     grid.push(row);
     onProgress && onProgress(0.85 + r / meshN * 0.15, '地形メッシュ生成中…');
+    if ((r & 15) === 0 && typeof jobYield === 'function') await jobYield();
   }
   return grid;
 }
@@ -672,6 +677,7 @@ async function fetchAerialPhoto(bb, requestedZoom, onProgress, opts) {
     }
     done++;
     onProgress && onProgress(done / tot, `航空写真 ${src.name} z${effectiveZoom}: ${done}/${tot}`);
+    if (typeof jobYield === 'function') await jobYield();
   });
 
   // Skip the JPEG roundtrip — round-tripping through toDataURL('image/jpeg', 0.95)

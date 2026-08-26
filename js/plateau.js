@@ -884,7 +884,9 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress, opts) {
         if (!visited.has(absUrl)) {
           visited.add(absUrl);
           try {
-            const sub = await fetch(absUrl).then(r => r.json());
+            const subRes = await cachedFetch(absUrl);
+            if (!subRes.ok) throw new Error('HTTP ' + subRes.status);
+            const sub = await subRes.json();
             const subBase = absUrl.substring(0, absUrl.lastIndexOf('/') + 1);
             if (sub && sub.root) await walk(sub.root, xform, subBase, region, refine);
           } catch (e) {
@@ -905,7 +907,15 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress, opts) {
     }
   }
 
-  const rootTileset = await fetch(tilesetUrl).then(r => r.json());
+  // Tileset manifests and b3dm payloads go through cachedFetch (Cache API),
+  // not bare fetch. A dense ward is 100-500 MB of b3dm and every single
+  // regenerate — including just nudging the radius slider — re-downloaded
+  // all of it. The Cache API keeps them on disk across reloads.
+  const rootRes = await cachedFetch(tilesetUrl);
+  if (!rootRes.ok) {
+    throw new Error(`PLATEAU tileset.json HTTP ${rootRes.status} — ${tilesetUrl}`);
+  }
+  const rootTileset = await rootRes.json();
   const rootBase = tilesetUrl.substring(0, tilesetUrl.lastIndexOf('/') + 1);
   await walk(rootTileset.root, new THREE.Matrix4(), rootBase);
 
@@ -951,7 +961,9 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress, opts) {
 
   async function loadOne(leaf) {
     try {
-      const buffer = await fetch(leaf.url).then(r => r.arrayBuffer());
+      const res = await cachedFetch(leaf.url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const buffer = await res.arrayBuffer();
       // Content can be b3dm (28-byte header + glb) or a bare .glb. Detect
       // by magic: "b3dm" → strip header, "glTF" → use as-is.
       const magic = String.fromCharCode(
@@ -1111,6 +1123,10 @@ async function loadPlateauBuildings(tilesetUrl, bb, onProgress, opts) {
     while (queue.length) {
       const leaf = queue.shift();
       if (leaf) await loadOne(leaf);
+      // Hand the event loop back between tiles: Draco decode + material
+      // rebuild is synchronous work, and this is also where a cancel
+      // click gets a chance to be seen (jobYield throws to unwind).
+      if (typeof jobYield === 'function') await jobYield();
     }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, pump));

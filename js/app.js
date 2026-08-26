@@ -44,6 +44,81 @@ function showProgress(v) {
   if (v) cancelProgressHide();
 }
 
+// ── Generation job control ───────────────────────────────────────────────
+// The whole generate used to run as ONE unyielding task: the browser never
+// got the event loop back between fetching tiles, decoding them, building
+// geometry and walking every vertex, so the progress bar was decorative
+// (it cannot repaint) and the tab was frozen for seconds at a time. There
+// was also no way to stop a run you started by mistake — on a 3 km radius
+// that is a long wait with no exit.
+//
+// Long loops now call jobYield() at checkpoints. That hands the event loop
+// back (bar repaints, cancel click is processed) and doubles as the
+// cancellation point: if the job has been cancelled or superseded by a
+// newer run, jobYield throws CANCELLED and the whole stack unwinds.
+const CANCELLED = Symbol('generate-cancelled');
+let _cancelled = false;
+
+function jobActive() { return !_cancelled; }
+
+function cancelGenerate() {
+  if (!_cancelled) {
+    _cancelled = true;
+    showError('生成を中止しています…');
+  }
+}
+
+// Callable from any module without plumbing a signal through every
+// signature — matches how the rest of this codebase shares globals.
+async function jobYield() {
+  if (!jobActive()) throw CANCELLED;
+  await new Promise(r => setTimeout(r, 0));
+  if (!jobActive()) throw CANCELLED;
+}
+
+// Yield only every `every` calls — a yield costs a task round-trip, so
+// hot inner loops should not take one per iteration.
+function makeThrottledYield(every) {
+  let n = 0;
+  return async () => { if (++n % every === 0) await jobYield(); };
+}
+
+// ── Layer visibility ─────────────────────────────────────────────────────
+// Every layer used to be baked in at generate time, so hiding roads or
+// trees meant re-fetching Overpass and rebuilding the whole scene — tens
+// of seconds to answer a question the GPU can answer in one frame. These
+// are pure .visible flips.
+const LAYER_GROUPS = {
+  layerRoads:   ['roads', 'bridges'],
+  layerRails:   ['railways'],
+  layerWater:   ['water'],
+  layerTrees:   ['trees'],
+};
+
+function applyLayerVisibility() {
+  const on = id => {
+    const el = document.getElementById(id);
+    return el ? el.checked : true;
+  };
+  if (currentFeatures) {
+    const wanted = new Map();
+    for (const [id, names] of Object.entries(LAYER_GROUPS)) {
+      for (const n of names) wanted.set(n, on(id));
+    }
+    for (const child of currentFeatures.children) {
+      if (wanted.has(child.name)) child.visible = wanted.get(child.name);
+    }
+  }
+  if (currentTerrain) currentTerrain.visible = on('layerTerrain');
+  if (currentBuildings) currentBuildings.visible = on('toggleBuildings');
+  if (typeof requestRender === 'function') requestRender();
+}
+
+function setCancelVisible(v) {
+  const b = document.getElementById('cancelBtn');
+  if (b) b.style.display = v ? 'block' : 'none';
+}
+
 let _progressHideTimer = null;
 function cancelProgressHide() {
   if (_progressHideTimer != null) { clearTimeout(_progressHideTimer); _progressHideTimer = null; }
@@ -96,9 +171,21 @@ function persistInputs() {
       meshDetail: document.getElementById('meshDetail').value,
       hour: document.getElementById('timeOfDay').value,
       plateau: document.getElementById('togglePlateau').checked,
+      layers: _layerState(),
     }));
   } catch {}
 }
+
+function _layerState() {
+  const out = {};
+  for (const id of ['layerRoads', 'layerRails', 'layerWater', 'layerTrees',
+                    'layerTerrain']) {
+    const el = document.getElementById(id);
+    if (el) out[id] = el.checked;
+  }
+  return out;
+}
+function persistLayers() { persistInputs(); }
 
 function restoreInputs() {
   try {
@@ -139,6 +226,12 @@ function restoreInputs() {
       if (typeof setTimeOfDay === 'function') setTimeOfDay(parseFloat(v.hour));
     }
     if (typeof v.plateau === 'boolean') document.getElementById('togglePlateau').checked = v.plateau;
+    if (v.layers && typeof v.layers === 'object') {
+      for (const [id, on] of Object.entries(v.layers)) {
+        const el = document.getElementById(id);
+        if (el && typeof on === 'boolean') el.checked = on;
+      }
+    }
   } catch {}
 }
 
@@ -350,15 +443,20 @@ function downloadScreenshot() {
 // rectangle (plus `margin`), rewriting each mesh's geometry in place.
 // Triangle granularity is what makes this correct for PLATEAU, where one
 // mesh can hold an entire district. Returns { total, removed } counts.
-function cullGeometryOutside(group, xSize, zSize, margin) {
+async function cullGeometryOutside(group, xSize, zSize, margin) {
   group.updateMatrixWorld(true);
   const lo = -margin, hiX = xSize + margin, hiZ = zSize + margin;
   const v = new THREE.Vector3();
   let total = 0, removed = 0;
   const doomed = [];
 
+  // Collect first, then process with yields — traverse() cannot await.
+  const meshes = [];
   group.traverse(o => {
-    if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+    if (o.isMesh && o.geometry && o.geometry.attributes.position) meshes.push(o);
+  });
+  for (const o of meshes) {
+    await jobYield();
     const src = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry;
     const pos = src.attributes.position;
     const uv = src.attributes.uv, nrm = src.attributes.normal;
@@ -378,10 +476,10 @@ function cullGeometryOutside(group, xSize, zSize, margin) {
       cx /= 3; cz /= 3;
       if (cx >= lo && cx <= hiX && cz >= lo && cz <= hiZ) { keep[t] = 1; kept++; }
     }
-    if (kept === triCount) { if (src !== o.geometry) src.dispose(); return; }
+    if (kept === triCount) { if (src !== o.geometry) src.dispose(); continue; }
     removed += triCount - kept;
 
-    if (kept === 0) { doomed.push(o); if (src !== o.geometry) src.dispose(); return; }
+    if (kept === 0) { doomed.push(o); if (src !== o.geometry) src.dispose(); continue; }
 
     const np = new Float32Array(kept * 9);
     const nu = uv  ? new Float32Array(kept * 6) : null;
@@ -414,7 +512,7 @@ function cullGeometryOutside(group, xSize, zSize, margin) {
     if (src !== o.geometry) src.dispose();
     o.geometry.dispose();
     o.geometry = g;
-  });
+  }
 
   for (const o of doomed) {
     if (o.parent) o.parent.remove(o);
@@ -455,6 +553,8 @@ async function run() {
   document.getElementById('runBtn').disabled = true;
   setExportEnabled(false);   // stale-scene export during the rebuild = partial ZIP
   showProgress(true);
+  _cancelled = false;
+  setCancelVisible(true);
 
   // Everything below runs inside try/finally: any uncaught throw (WebGL
   // context loss during texture upload, a geometry bug…) used to leave
@@ -472,9 +572,13 @@ async function run() {
       setProgress(p * 0.4, label || '地形データ取得中…');
     });
   } catch (e) {
+    // CANCELLED is a Symbol, not an Error — swallowing it here would show
+    // "地形取得失敗: undefined" and quietly finish instead of unwinding.
+    if (e === CANCELLED) throw e;
     showError('地形取得失敗: ' + e.message);
     return;
   }
+  await jobYield();
   // elevGrid.length === meshN (kept here only as a sanity guard if the
   // backend ever decides to clamp differently for tiny bboxes).
 
@@ -488,9 +592,11 @@ async function run() {
       setProgress(0.4 + p * 0.3, label || '航空写真取得中…');
     }, { mode: photoSrc, customs: customAerials, maxTextureEdge });
   } catch (e) {
+    if (e === CANCELLED) throw e;
     showError('航空写真取得失敗: ' + e.message);
     return;
   }
+  await jobYield();
 
   // ── Step 3: build 3D scene ─────────────────────────────────────────────
   setProgress(0.7, '3Dシーン構築中…');
@@ -574,6 +680,7 @@ async function run() {
       facadePromise,
       cc0Promise,
     ]);
+    await jobYield();
     const bElems = bRes.status === 'fulfilled' ? bRes.value : [];
     const gElems = gRes.status === 'fulfilled' ? gRes.value : [];
     if (bRes.status === 'rejected') console.warn('建物取得失敗:', bRes.reason);
@@ -591,6 +698,7 @@ async function run() {
       scene.add(featGroup);
       if (typeof requestRender === "function") requestRender();
       currentFeatures = featGroup;   // for export
+      await jobYield();
 
       // PLATEAU path
       let usedPlateau = false;
@@ -616,6 +724,7 @@ async function run() {
                 { aerialTex, facadePalette, cc0Walls });
               if (g) plateauGroup.add(g);
             } catch (e) {
+              if (e === CANCELLED) throw e;
               console.warn(`PLATEAU ${pick.city.name} load failed:`, e);
             }
           }
@@ -637,7 +746,7 @@ async function run() {
             // of its out-of-map sprawl. Cull per TRIANGLE instead: exact, and
             // independent of how the source happens to group its meshes.
             const MARGIN = 120;   // metres of slack beyond the map edge
-            const culled = cullGeometryOutside(plateauGroup, xSize, zSize, MARGIN);
+            const culled = await cullGeometryOutside(plateauGroup, xSize, zSize, MARGIN);
             if (culled.removed) {
               console.log(`[PLATEAU] culled ${culled.removed}/${culled.total} triangle(s) ` +
                 `outside the ${km} km area`);
@@ -673,8 +782,12 @@ async function run() {
             binMin.fill(Infinity);
             const _v = new THREE.Vector3();
             let sampled = 0;
+            const alignMeshes = [];
             plateauGroup.traverse(o => {
-              if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+              if (o.isMesh && o.geometry && o.geometry.attributes.position) alignMeshes.push(o);
+            });
+            for (const o of alignMeshes) {
+              await jobYield();
               const pos = o.geometry.attributes.position;
               // Iterate every vertex — per-bin min is robust to dense
               // sampling but degrades if we miss the wall-bottom corner.
@@ -687,7 +800,7 @@ async function run() {
                 if (_v.y < binMin[k]) binMin[k] = _v.y;
                 sampled++;
               }
-            });
+            }
             const deltas = [];
             for (let bz = 0; bz < nz; bz++) {
               for (let bx = 0; bx < nx; bx++) {
@@ -725,6 +838,7 @@ async function run() {
             setProgress(0.96, `✨ PLATEAU ${lodLabel} ${cityNames} で表示中`);
           }
         } catch (e) {
+          if (e === CANCELLED) throw e;
           console.warn('PLATEAU load failed, falling back to OSM:', e);
         }
       }
@@ -733,7 +847,7 @@ async function run() {
       if (!usedPlateau) {
         setProgress(0.88, '建物3D生成中（OSM）…');
         const parsed = parseBuildings(bElems, bb);
-        currentBuildings = createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag, { aerialTex, facadePalette, cc0Walls });
+        currentBuildings = await createBuildingGroup(parsed, bb, elevGrid, meshN, vertExag, { aerialTex, facadePalette, cc0Walls });
         currentBuildingData = parsed;   // for click-to-inspect
         currentBB = bb;
         scene.add(currentBuildings);
@@ -747,6 +861,7 @@ async function run() {
         );
       }
     } catch (e) {
+      if (e === CANCELLED) throw e;   // must unwind, not be logged as a failure
       console.warn('ジオメトリ生成失敗:', e);
     }
   }
@@ -755,12 +870,25 @@ async function run() {
   // the user whether they got PLATEAU or OSM (and any ⚠️ partial-failure
   // note). Overwriting it with 完了 in the same tick made it unreadable.
   document.getElementById('progressBar').style.width = '100%';
+  // Honour the layer checkboxes restored from localStorage on the scene we
+  // just built, so a user who turned trees off stays with trees off.
+  applyLayerVisibility();
   scheduleProgressHide(4000);
 
   } catch (e) {
-    console.error('run() failed:', e);
-    showError('生成失敗: ' + (e.message || e));
+    if (e === CANCELLED) {
+      // Cancelled runs leave a half-built scene; drop it so the viewport
+      // does not show a city with no roads and claim it is finished.
+      clearSceneObjects();
+      currentTerrain = currentBuildings = currentFeatures = null;
+      currentBuildingData = null;
+      showStatus('生成を中止しました');
+    } else {
+      console.error('run() failed:', e);
+      showError('生成失敗: ' + (e.message || e));
+    }
   } finally {
+    setCancelVisible(false);
     document.getElementById('runBtn').disabled = false;
     // Re-enable export/share/screenshot even when the run threw. These
     // were only re-enabled on the success path, so a single failed
@@ -874,6 +1002,26 @@ document.addEventListener('DOMContentLoaded', () => {
     const el = document.getElementById(id);
     if (el) el.addEventListener(ev, fn);
   };
+  on('cancelBtn', 'click', cancelGenerate);
+
+  // Layer checkboxes are instant .visible flips, not regenerate triggers.
+  for (const id of ['layerRoads', 'layerRails', 'layerWater', 'layerTrees',
+                    'layerTerrain']) {
+    on(id, 'change', () => { applyLayerVisibility(); persistLayers(); });
+  }
+  // 建物を表示 keeps its generate-time role (unchecked = skip the Overpass
+  // building query entirely), but now ALSO hides/shows instantly when a
+  // scene already exists. Re-checking it after a run that never built any
+  // buildings has nothing to show, so say so rather than appearing broken.
+  on('toggleBuildings', 'change', () => {
+    const el = document.getElementById('toggleBuildings');
+    if (el.checked && !currentBuildings && currentTerrain) {
+      showStatus('建物は生成されていません — 「3D表示を生成」で再生成してください');
+    }
+    applyLayerVisibility();
+    persistInputs();
+  });
+
   on('photoSource', 'change', persistInputs);
   on('textureQuality', 'change', persistInputs);
   on('customAerialJson', 'input', () => { validateCustomAerialJson(); persistInputs(); });
